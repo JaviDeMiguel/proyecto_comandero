@@ -1,0 +1,7 @@
+# `dart test` sin argumentos ejecuta solo las suites Dart puro (red, persistencia,
+# motores en isolates, dominio). Los tests de widgets (test/widget) necesitan el
+# motor de Flutter y se lanzan con `flutter test`, que ejecuta además todo lo anterior.
+paths:
+  - test/architecture
+  - test/core
+  - test/features
