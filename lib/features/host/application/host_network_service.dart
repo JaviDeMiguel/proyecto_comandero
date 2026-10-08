@@ -98,6 +98,7 @@ final class HostNetworkService {
   StreamSubscription<HostSessionEvent>? _serverEvents;
   StreamSubscription<SalaChangedEvent>? _salaEvents;
   StreamSubscription<CatalogoChangedEvent>? _catalogEvents;
+  StreamSubscription<void>? _enrutamientoEvents;
   final StreamController<HostSessionEvent> _sessionEvents =
       StreamController<HostSessionEvent>.broadcast();
   Future<void>? _transition;
@@ -149,6 +150,9 @@ final class HostNetworkService {
     _catalogEvents = _catalog.changes.listen(
       (event) => _broadcast(SalaMessageTypes.catalogoChanged, event.toJson()),
     );
+    _enrutamientoEvents = _sala.enrutamientoChanges.listen(
+      (_) => _broadcast(SalaMessageTypes.enrutamientoChanged, const {}),
+    );
     _log.info('Host "${_config.hostName}" escuchando en TCP ${server.port}');
 
     if (_config.discoveryEnabled) {
@@ -182,8 +186,10 @@ final class HostNetworkService {
   Future<void> _stop() async {
     await _salaEvents?.cancel();
     await _catalogEvents?.cancel();
+    await _enrutamientoEvents?.cancel();
     _salaEvents = null;
     _catalogEvents = null;
+    _enrutamientoEvents = null;
     final responder = _responder;
     _responder = null;
     await responder?.stop();

@@ -6,13 +6,18 @@ import '../../../core/utils/json_map.dart';
 import 'settings_json.dart';
 
 /// Ajustes fiscales y de facturación contra FacturaScripts.
+///
+/// Los valores por defecto son los códigos que crea el asistente del plugin
+/// de hostelería de FacturaScripts: serie `S` (simplificada), cliente
+/// genérico `TPV` y formas de pago `TPVEFE` (Efectivo TPV) y `TPVTAR`
+/// (Tarjeta TPV). Los ajustes ya guardados conservan sus valores.
 final class FiscalSettings extends Equatable {
   const FiscalSettings({
     this.codserie = 'S',
     this.codcliente = 'TPV',
     this.codalmacen,
-    this.codpagoEfectivo = 'CONT',
-    this.codpagoTarjeta = 'TARJETA',
+    this.codpagoEfectivo = codpagoEfectivoPorDefecto,
+    this.codpagoTarjeta = codpagoTarjetaPorDefecto,
     this.idempresa,
     this.emitirFacturas = true,
     this.modoAsientoZ = ModoAsientoZ.soloDescuadre,
@@ -64,6 +69,12 @@ final class FiscalSettings extends Equatable {
       nombreTpv: json.optionalString('nombreTpv') ?? defaults.nombreTpv,
     );
   }
+
+  /// Forma de pago "Efectivo TPV" que crea el asistente del plugin.
+  static const String codpagoEfectivoPorDefecto = 'TPVEFE';
+
+  /// Forma de pago "Tarjeta TPV" que crea el asistente del plugin.
+  static const String codpagoTarjetaPorDefecto = 'TPVTAR';
 
   /// Serie de las facturas simplificadas (`codserie`).
   final String codserie;

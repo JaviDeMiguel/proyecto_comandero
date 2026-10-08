@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+ * Plugin Hosteleria: columna "Destino TPV" en el listado de familias ("-" = hereda).
+-->
+<view>
+    <columns>
+        <column name="tpv-destination" title="tpv-destination" order="125">
+            <widget type="select" fieldname="tpv_destino" translate="true">
+                <values title="tpv-kitchen">cocina</values>
+                <values title="tpv-bar">barra</values>
+            </widget>
+        </column>
+    </columns>
+</view>

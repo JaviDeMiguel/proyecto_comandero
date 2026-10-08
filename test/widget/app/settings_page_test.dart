@@ -205,7 +205,8 @@ void main() {
     final guardados = (await repo.load())!;
     expect(guardados.fsApi!.baseUrl, 'http://192.168.1.10/facturascripts');
     expect(guardados.fsApi!.token, 'clave-secreta');
-    expect(guardados.fiscal.codpagoEfectivo, 'CONT');
+    // Valor por defecto: la forma de pago del asistente del plugin.
+    expect(guardados.fiscal.codpagoEfectivo, 'TPVEFE');
     expect(guardados.fiscal.codpagoTarjeta, 'TARJ');
     expect(guardados.fiscal.codalmacen, 'ALG');
     expect(guardados.fiscal.modoAsientoZ, ModoAsientoZ.resumenCompleto);

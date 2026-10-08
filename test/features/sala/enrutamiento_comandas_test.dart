@@ -55,15 +55,22 @@ void main() {
         porDefecto: barra,
       );
       expect(e.destinoDe('ART', madreDe: madreDe), cocina);
-      expect(e.origenDe('ART', madreDe: madreDe), (
-        destino: cocina,
-        familia: 'CER',
-      ));
+      expect(
+        e.origenDe('ART', madreDe: madreDe),
+        const ResolucionDestino(
+          destino: cocina,
+          origen: OrigenDestino.reglaTpv,
+          familia: 'CER',
+        ),
+      );
       expect(e.destinoDe('POS', madreDe: madreDe), barra);
-      expect(e.origenDe('POS', madreDe: madreDe), (
-        destino: barra,
-        familia: null,
-      ));
+      expect(
+        e.origenDe('POS', madreDe: madreDe),
+        const ResolucionDestino(
+          destino: barra,
+          origen: OrigenDestino.porDefecto,
+        ),
+      );
     });
 
     test('un ciclo en la jerarquía no cuelga: usa el destino por defecto', () {
@@ -87,6 +94,213 @@ void main() {
             .destinoDe('X', madreDe: j),
         cocina,
       );
+    });
+  });
+
+  group('destinos del ERP (familias.tpv_destino)', () {
+    /// Bebidas (ERP barra) ⊃ Cervezas (ERP cocina) ⊃ Artesanas;
+    /// Bebidas ⊃ Vinos; Comidas ⊃ Postres (ERP barra); Raciones ⊃ Tapas.
+    const conErp = <FamiliaCatalogo>[
+      FamiliaCatalogo(
+        codfamilia: 'BEB',
+        descripcion: 'Bebidas',
+        destino: 'barra',
+      ),
+      FamiliaCatalogo(
+        codfamilia: 'CER',
+        descripcion: 'Cervezas',
+        madre: 'BEB',
+        destino: 'cocina',
+      ),
+      FamiliaCatalogo(
+        codfamilia: 'ART',
+        descripcion: 'Artesanas',
+        madre: 'CER',
+      ),
+      FamiliaCatalogo(codfamilia: 'VIN', descripcion: 'Vinos', madre: 'BEB'),
+      FamiliaCatalogo(codfamilia: 'COM', descripcion: 'Comidas'),
+      FamiliaCatalogo(
+        codfamilia: 'POS',
+        descripcion: 'Postres',
+        madre: 'COM',
+        destino: 'barra',
+      ),
+      FamiliaCatalogo(codfamilia: 'RAC', descripcion: 'Raciones'),
+      FamiliaCatalogo(codfamilia: 'TAP', descripcion: 'Tapas', madre: 'RAC'),
+    ];
+    final madreErp = EnrutamientoComandas.jerarquia(conErp);
+    final erp = EnrutamientoComandas.destinosErp(conErp);
+
+    test('destinosErp solo recoge las familias con destino válido', () {
+      expect(erp, {'BEB': barra, 'CER': cocina, 'POS': barra});
+      expect(
+        EnrutamientoComandas.destinosErp(const [
+          FamiliaCatalogo(codfamilia: 'A', descripcion: 'A', destino: 'BARRA '),
+          FamiliaCatalogo(codfamilia: 'B', descripcion: 'B', destino: ''),
+          FamiliaCatalogo(
+            codfamilia: 'C',
+            descripcion: 'C',
+            destino: 'terraza',
+          ),
+          FamiliaCatalogo(codfamilia: 'D', descripcion: 'D'),
+        ]),
+        {'A': barra},
+      );
+      expect(EnrutamientoComandas.destinoDeErp('cocina'), cocina);
+      expect(EnrutamientoComandas.destinoDeErp(null), isNull);
+    });
+
+    test('sin reglas del TPV manda el ERP, heredado por la jerarquía', () {
+      const e = EnrutamientoComandas();
+      ResolucionDestino r(String cod) =>
+          e.origenDe(cod, madreDe: madreErp, erp: erp);
+      expect(
+        r('BEB'),
+        const ResolucionDestino(
+          destino: barra,
+          origen: OrigenDestino.erp,
+          familia: 'BEB',
+        ),
+      );
+      expect(r('VIN').destino, barra, reason: 'hereda el ERP de Bebidas');
+      expect(r('VIN').familia, 'BEB');
+      expect(
+        r('CER').destino,
+        cocina,
+        reason: 'ERP propio gana al de la madre',
+      );
+      expect(
+        r('ART'),
+        const ResolucionDestino(
+          destino: cocina,
+          origen: OrigenDestino.erp,
+          familia: 'CER',
+        ),
+      );
+      expect(r('COM').origen, OrigenDestino.porDefecto);
+      expect(r('POS').destino, barra);
+      expect(r('TAP').origen, OrigenDestino.porDefecto);
+      expect(e.destinoDe(null, madreDe: madreErp, erp: erp), cocina);
+    });
+
+    test('precedencia por nivel: en cada nivel la regla del TPV y después el '
+        'ERP; el nivel más cercano gana', () {
+      // Regla del TPV en la misma familia que el ERP: gana el TPV.
+      const sobreCer = EnrutamientoComandas(porFamilia: {'CER': barra});
+      expect(
+        sobreCer.origenDe('CER', madreDe: madreErp, erp: erp),
+        const ResolucionDestino(
+          destino: barra,
+          origen: OrigenDestino.reglaTpv,
+          familia: 'CER',
+        ),
+      );
+      expect(sobreCer.destinoDe('ART', madreDe: madreErp, erp: erp), barra);
+
+      // Regla del TPV en la madre: el ERP de la hija (nivel más cercano)
+      // gana; la hermana sin ERP hereda la regla del TPV.
+      const sobreBeb = EnrutamientoComandas(porFamilia: {'BEB': cocina});
+      expect(
+        sobreBeb.origenDe('CER', madreDe: madreErp, erp: erp).origen,
+        OrigenDestino.erp,
+      );
+      expect(sobreBeb.destinoDe('ART', madreDe: madreErp, erp: erp), cocina);
+      expect(
+        sobreBeb.origenDe('VIN', madreDe: madreErp, erp: erp),
+        const ResolucionDestino(
+          destino: cocina,
+          origen: OrigenDestino.reglaTpv,
+          familia: 'BEB',
+        ),
+      );
+
+      // Regla del TPV en la hija gana al ERP de la madre.
+      const sobreArt = EnrutamientoComandas(porFamilia: {'ART': barra});
+      expect(sobreArt.destinoDe('ART', madreDe: madreErp, erp: erp), barra);
+
+      // Por defecto solo si ningún nivel define nada.
+      const defectoBarra = EnrutamientoComandas(porDefecto: barra);
+      expect(defectoBarra.destinoDe('TAP', madreDe: madreErp, erp: erp), barra);
+      expect(
+        defectoBarra.destinoDe('CER', madreDe: madreErp, erp: erp),
+        cocina,
+      );
+    });
+
+    test('un ciclo en la jerarquía con destinos del ERP no cuelga', () {
+      const ciclo = {'A': 'B', 'B': 'C', 'C': 'A'};
+      const e = EnrutamientoComandas(porDefecto: barra);
+      expect(e.destinoDe('A', madreDe: ciclo), barra);
+      expect(e.destinoDe('A', madreDe: ciclo, erp: {'C': cocina}), cocina);
+      expect(
+        const EnrutamientoComandas(porFamilia: {'B': barra})
+            .destinoDe('A', madreDe: ciclo, erp: {'C': cocina}),
+        barra,
+        reason: 'B está más cerca de A que C',
+      );
+    });
+
+    test('conDestinosErp: mismo destino que el host para todas las familias, '
+        'con o sin jerarquía y destinos del ERP, e idempotente', () {
+      const reglas = EnrutamientoComandas(
+        porFamilia: {'BEB': cocina, 'TAP': barra, 'BORRADA': barra},
+      );
+      final efectivo = reglas.conDestinosErp(conErp);
+      expect(efectivo.porDefecto, reglas.porDefecto);
+      expect(efectivo.porFamilia, {
+        'BEB': cocina, // regla del TPV sobre el ERP
+        'CER': cocina, // ERP propio
+        'ART': cocina, // hereda el ERP de Cervezas
+        'VIN': cocina, // hereda la regla del TPV de Bebidas
+        'POS': barra, // ERP propio
+        'TAP': barra, // regla del TPV
+        'BORRADA': barra, // regla de una familia fuera del catálogo
+      });
+      expect(() => efectivo.porFamilia['X'] = cocina, throwsUnsupportedError);
+
+      for (final cod in [
+        ...conErp.map((f) => f.codfamilia),
+        'BORRADA',
+        'DESCONOCIDA',
+        null,
+      ]) {
+        final enHost = reglas.destinoDe(cod, madreDe: madreErp, erp: erp);
+        expect(efectivo.destinoDe(cod), enHost, reason: '$cod sin jerarquía');
+        expect(
+          efectivo.destinoDe(cod, madreDe: madreErp),
+          enHost,
+          reason: '$cod con jerarquía',
+        );
+        expect(
+          efectivo.destinoDe(cod, madreDe: madreErp, erp: erp),
+          enHost,
+          reason: '$cod con jerarquía y ERP',
+        );
+      }
+      expect(efectivo.conDestinosErp(conErp), efectivo);
+      expect(efectivo.usa(barra), isTrue);
+    });
+
+    test('conDestinosErp sin destinos en el ERP devuelve el mismo '
+        'enrutamiento (sin aplanar)', () {
+      const e = EnrutamientoComandas(porFamilia: {'BEB': barra});
+      expect(identical(e.conDestinosErp(familias), e), isTrue);
+      expect(e.conDestinosErp(const []), e);
+    });
+
+    test('el enrutamiento efectivo viaja en el snapshot de sala', () {
+      final efectivo = const EnrutamientoComandas().conDestinosErp(conErp);
+      final s = SalaSnapshot(
+        mesas: const [Mesa(id: 'm1', nombre: 'Mesa 1')],
+        comandas: const [],
+        generadoEn: DateTime(2026, 10, 8),
+        enrutamiento: efectivo,
+      );
+      final leido = SalaSnapshot.fromJson(ida(s.toJson())).enrutamiento!;
+      expect(leido, efectivo);
+      expect(leido.destinoDe('VIN'), barra);
+      expect(leido.destinoDe('ART'), cocina);
+      expect(leido.destinoDe('TAP'), cocina);
     });
   });
 

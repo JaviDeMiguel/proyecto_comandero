@@ -68,8 +68,10 @@ final class CorruptSettingsRepository
   }
 }
 
+/// Formas de pago del ERP: la de efectivo es la que crea el asistente del
+/// plugin de hostelería (`TPVEFE`, valor por defecto de los ajustes).
 const List<FsFormaPago> kFormasPrueba = [
-  FsFormaPago(codpago: 'CONT', descripcion: 'Al contado', pagado: true),
+  FsFormaPago(codpago: 'TPVEFE', descripcion: 'Efectivo TPV', pagado: true),
   FsFormaPago(codpago: 'TARJ', descripcion: 'Tarjeta'),
   FsFormaPago(codpago: 'TRANS', descripcion: 'Transferencia'),
 ];

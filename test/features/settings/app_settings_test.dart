@@ -91,8 +91,9 @@ void main() {
       expect(s.fiscal.codserie, 'S');
       expect(s.fiscal.codcliente, 'TPV');
       expect(s.fiscal.codalmacen, isNull);
-      expect(s.fiscal.codpagoEfectivo, 'CONT');
-      expect(s.fiscal.codpagoTarjeta, 'TARJETA');
+      // Códigos que crea el asistente del plugin de hostelería de FS.
+      expect(s.fiscal.codpagoEfectivo, 'TPVEFE');
+      expect(s.fiscal.codpagoTarjeta, 'TPVTAR');
       expect(s.fiscal.idempresa, isNull);
       expect(s.fiscal.emitirFacturas, isTrue);
       expect(s.fiscal.modoAsientoZ, ModoAsientoZ.soloDescuadre);
@@ -168,6 +169,29 @@ void main() {
       expect(s.reposicion.politica.factorSinMaximo, 2.0);
       expect(s.fondoCajaCents, 5000);
       expect(s.mesas, isEmpty);
+    });
+
+    test('las formas de pago ya guardadas se conservan; las ausentes toman '
+        'los códigos del asistente del plugin', () {
+      final guardadas = FiscalSettings.fromJson(const {
+        'codpagoEfectivo': 'CONT',
+        'codpagoTarjeta': 'TARJETA',
+      });
+      expect(guardadas.codpagoEfectivo, 'CONT');
+      expect(guardadas.codpagoTarjeta, 'TARJETA');
+      expect(
+        FiscalSettings.fromJson(guardadas.toJson()),
+        guardadas,
+        reason: 'el guardado no los sustituye por los nuevos',
+      );
+      final antiguas = FiscalSettings.fromJson(const {'codserie': 'S'});
+      expect(
+        antiguas.codpagoEfectivo,
+        FiscalSettings.codpagoEfectivoPorDefecto,
+      );
+      expect(antiguas.codpagoTarjeta, FiscalSettings.codpagoTarjetaPorDefecto);
+      expect(FiscalSettings.codpagoEfectivoPorDefecto, 'TPVEFE');
+      expect(FiscalSettings.codpagoTarjetaPorDefecto, 'TPVTAR');
     });
 
     test('campos desconocidos se ignoran', () {

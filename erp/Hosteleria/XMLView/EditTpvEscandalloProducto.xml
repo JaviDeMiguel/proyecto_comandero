@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+ * Plugin Hosteleria: pestaña "Escandallo" de la ficha de producto (vista en línea).
+ * Las columnas de cantidad bruta y costes son de solo lectura: las calcula
+ * Lib/TpvCosteEscandallo al cargar la pestaña.
+-->
+<view>
+    <columns>
+        <column name="id" display="none" order="90">
+            <widget type="text" fieldname="id"/>
+        </column>
+        <column name="dish" title="tpv-dish" numcolumns="2" order="100">
+            <widget type="select" fieldname="ref_plato" required="true"/>
+        </column>
+        <column name="ingredient" title="tpv-ingredient" numcolumns="2" order="110">
+            <widget type="autocomplete" fieldname="ref_ingrediente" required="true">
+                <values source="variantes" fieldcode="referencia" fieldtitle="referencia"/>
+            </widget>
+        </column>
+        <column name="ingredient-description" title="description" numcolumns="2" order="120">
+            <widget type="text" fieldname="ingrediente_descripcion" readonly="true"/>
+        </column>
+        <column name="net-quantity" title="tpv-net-quantity" numcolumns="1" order="130">
+            <widget type="number" fieldname="cantidad" decimal="3" min="0" required="true"/>
+        </column>
+        <column name="waste" title="tpv-waste-pct" numcolumns="1" order="140">
+            <widget type="number" fieldname="merma" decimal="2" min="0" max="99.99"/>
+        </column>
+        <column name="gross-quantity" title="tpv-gross-quantity" numcolumns="1" order="150">
+            <widget type="number" fieldname="cantidad_bruta" decimal="3" readonly="true"/>
+        </column>
+        <column name="unit-cost" title="tpv-unit-cost" numcolumns="1" order="160">
+            <widget type="money" fieldname="coste_unitario" readonly="true"/>
+        </column>
+        <column name="line-cost" title="tpv-line-cost" numcolumns="1" order="170">
+            <widget type="money" fieldname="coste_linea" readonly="true"/>
+        </column>
+        <column name="observations" numcolumns="1" order="180">
+            <widget type="text" fieldname="observaciones" maxlength="255"/>
+        </column>
+    </columns>
+    <rows>
+        <row type="header">
+            <group name="tpv-cost" numcolumns="12" html="Block/TpvEscandalloCoste.html.twig"/>
+        </row>
+    </rows>
+</view>

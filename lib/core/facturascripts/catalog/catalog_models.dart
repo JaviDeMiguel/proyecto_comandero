@@ -15,14 +15,35 @@ final class FamiliaCatalogo extends Equatable {
     required this.codfamilia,
     required this.descripcion,
     this.madre,
+    this.destino,
   });
 
+  /// Lee una familia del catálogo guardado o recibido. Los catálogos
+  /// anteriores al campo `destino` siguen siendo válidos (sin destino).
   factory FamiliaCatalogo.fromJson(Map<String, Object?> json) =>
       FamiliaCatalogo(
         codfamilia: json.requireString('codfamilia'),
         descripcion: json.requireString('descripcion'),
         madre: json.optionalString('madre'),
+        destino: normalizarDestino(json['destino']),
       );
+
+  /// Valor de `familias.tpv_destino` para preparar en cocina.
+  static const String destinoCocina = 'cocina';
+
+  /// Valor de `familias.tpv_destino` para preparar en barra.
+  static const String destinoBarra = 'barra';
+
+  /// Interpreta `familias.tpv_destino` (columna que añade el plugin de
+  /// hostelería de FacturaScripts) de forma tolerante: [destinoCocina] o
+  /// [destinoBarra] sin distinguir mayúsculas ni espacios; cualquier otra
+  /// cosa (ausente, nulo, vacío, desconocido o de otro tipo) es `null`, es
+  /// decir, "hereda de la familia madre".
+  static String? normalizarDestino(Object? raw) {
+    if (raw is! String) return null;
+    final valor = raw.trim().toLowerCase();
+    return (valor == destinoCocina || valor == destinoBarra) ? valor : null;
+  }
 
   final String codfamilia;
   final String descripcion;
@@ -30,14 +51,21 @@ final class FamiliaCatalogo extends Equatable {
   /// Familia padre (jerarquía de la carta), si la hay.
   final String? madre;
 
+  /// Puesto de preparación definido en el ERP (`familias.tpv_destino`):
+  /// [destinoCocina], [destinoBarra] o `null` (hereda de la madre y, si
+  /// ninguna lo define, se usa el destino por defecto del TPV).
+  final String? destino;
+
   Map<String, Object?> toJson() => {
     'codfamilia': codfamilia,
     'descripcion': descripcion,
     'madre': madre,
+    // Se omite si no hay: el JSON de las familias sin destino no cambia.
+    if (destino != null) 'destino': destino,
   };
 
   @override
-  List<Object?> get props => [codfamilia, descripcion, madre];
+  List<Object?> get props => [codfamilia, descripcion, madre, destino];
 }
 
 /// Impuesto (`impuestos`). El IVA se identifica siempre por [codimpuesto],

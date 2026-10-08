@@ -250,6 +250,69 @@ void main() {
     expect(snapshot.impuesto('IVA0')!.codsubcuentarep, isNull);
   });
 
+  group('familias.tpv_destino (plugin de hostelería)', () {
+    test('sin la columna (FS sin el plugin) el destino es null', () async {
+      final snapshot = await service.cargar(now: () => fixedNow);
+      expect(snapshot.familias.map((f) => f.destino), everyElement(isNull));
+      // Sin destino, el JSON de la familia no gana el campo.
+      expect(snapshot.familias.first.toJson().containsKey('destino'), isFalse);
+    });
+
+    test('lee cocina/barra de forma tolerante; vacío, nulo o desconocido '
+        'es null', () async {
+      api.records['familias'] = [
+        {..._familia('BEBIDAS', 'Bebidas'), 'tpv_destino': 'barra'},
+        {
+          ..._familia('CERVEZAS', 'Cervezas', madre: 'BEBIDAS'),
+          'tpv_destino': ' Cocina ',
+        },
+        {..._familia('CONTA', 'Contabilidad'), 'tpv_destino': null},
+        {..._familia('MATERIAS', 'Materias'), 'tpv_destino': ''},
+        {..._familia('PLATOS', 'Platos'), 'tpv_destino': 'terraza'},
+        {..._familia('TAPAS', 'Tapas'), 'tpv_destino': 1},
+      ];
+      final snapshot = await service.cargar(now: () => fixedNow);
+      expect(
+        {for (final f in snapshot.familias) f.codfamilia: f.destino},
+        {
+          'BEBIDAS': 'barra',
+          'CERVEZAS': 'cocina',
+          'CONTA': null,
+          'MATERIAS': null,
+          'PLATOS': null,
+          'TAPAS': null,
+        },
+      );
+      expect(snapshot.familias[1].madre, 'BEBIDAS');
+
+      // Ida y vuelta por JSON (caché del host y envío a los comanderos).
+      final restored = CatalogSnapshot.fromJson(
+        jsonDecode(jsonEncode(snapshot.toJson())) as Map<String, Object?>,
+      );
+      expect(restored, snapshot);
+      expect(restored.familias.first.destino, 'barra');
+    });
+
+    test('un catálogo guardado sin el campo sigue siendo válido', () {
+      final familia = FamiliaCatalogo.fromJson(const {
+        'codfamilia': 'BEB',
+        'descripcion': 'Bebidas',
+        'madre': null,
+      });
+      expect(familia.destino, isNull);
+      expect(
+        FamiliaCatalogo.fromJson(const {
+          'codfamilia': 'BEB',
+          'descripcion': 'Bebidas',
+          'destino': 'piscina',
+        }).destino,
+        isNull,
+      );
+      expect(FamiliaCatalogo.normalizarDestino('BARRA'), 'barra');
+      expect(FamiliaCatalogo.normalizarDestino(true), isNull);
+    });
+  });
+
   test(
     'avisos: huérfana, impuesto desconocido/vacío, nostock=0+ventasinstock=0',
     () async {

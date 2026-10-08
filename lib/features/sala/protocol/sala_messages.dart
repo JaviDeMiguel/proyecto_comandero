@@ -38,6 +38,12 @@ abstract final class SalaMessageTypes {
 
   /// Evento: hay un catálogo nuevo ([CatalogoChangedEvent]).
   static const String catalogoChanged = 'catalogo.changed';
+
+  /// Evento sin payload (`{}`): cambiaron las reglas de enrutamiento del TPV
+  /// (familia → cocina/barra). El comandero vuelve a pedir el snapshot de
+  /// sala para tener el enrutamiento efectivo nuevo. Un comandero antiguo lo
+  /// ignora (tipo desconocido) y lo recibe al reconectar.
+  static const String enrutamientoChanged = 'enrutamiento.changed';
 }
 
 /// Códigos de error de aplicación devueltos en `error.code`.

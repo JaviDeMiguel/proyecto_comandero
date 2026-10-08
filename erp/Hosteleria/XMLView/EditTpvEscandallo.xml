@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+ * Plugin Hosteleria: ficha de una línea de escandallo (desde el listado general).
+-->
+<view>
+    <columns>
+        <group name="data" numcolumns="12">
+            <column name="id" display="none" order="90">
+                <widget type="text" fieldname="id"/>
+            </column>
+            <column name="dish" title="tpv-dish" description="tpv-dish-desc" numcolumns="3" order="100">
+                <widget type="autocomplete" fieldname="ref_plato" required="true">
+                    <values source="variantes" fieldcode="referencia" fieldtitle="referencia"/>
+                </widget>
+            </column>
+            <column name="ingredient" title="tpv-ingredient" description="tpv-ingredient-desc" numcolumns="3" order="110">
+                <widget type="autocomplete" fieldname="ref_ingrediente" required="true">
+                    <values source="variantes" fieldcode="referencia" fieldtitle="referencia"/>
+                </widget>
+            </column>
+            <column name="net-quantity" title="tpv-net-quantity" numcolumns="2" order="120">
+                <widget type="number" fieldname="cantidad" decimal="3" min="0" required="true"/>
+            </column>
+            <column name="waste" title="tpv-waste-pct" description="tpv-waste-desc" numcolumns="2" order="130">
+                <widget type="number" fieldname="merma" decimal="2" min="0" max="99.99" icon="fa-solid fa-percent"/>
+            </column>
+            <column name="gross-quantity" title="tpv-gross-quantity" numcolumns="2" order="140">
+                <widget type="number" fieldname="cantidad_bruta" decimal="3" readonly="true"/>
+            </column>
+            <column name="observations" numcolumns="12" order="150">
+                <widget type="text" fieldname="observaciones" maxlength="255"/>
+            </column>
+        </group>
+        <group name="tpv-cost" title="tpv-theoretical-cost" numcolumns="12">
+            <column name="unit-cost" title="tpv-unit-cost" numcolumns="3" order="100">
+                <widget type="money" fieldname="coste_unitario" readonly="true"/>
+            </column>
+            <column name="line-cost" title="tpv-line-cost" numcolumns="3" order="110">
+                <widget type="money" fieldname="coste_linea" readonly="true"/>
+            </column>
+            <column name="created" title="created" numcolumns="3" order="120">
+                <widget type="datetime" fieldname="creado" readonly="true"/>
+            </column>
+            <column name="updated" title="tpv-updated" numcolumns="3" order="130">
+                <widget type="datetime" fieldname="actualizado" readonly="true"/>
+            </column>
+        </group>
+    </columns>
+</view>

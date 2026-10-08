@@ -59,6 +59,8 @@ final class SalaService {
   final Set<Future<void>> _inFlight = {};
   final StreamController<SalaChangedEvent> _changes =
       StreamController<SalaChangedEvent>.broadcast();
+  final StreamController<void> _enrutamientoChanges =
+      StreamController<void>.broadcast();
 
   List<Mesa> get mesas => _store.snapshot.mesas;
   List<Comanda> get comandas => _store.snapshot.comandas;
@@ -68,6 +70,10 @@ final class SalaService {
 
   /// Cambios de comanda por mesa (broadcast).
   Stream<SalaChangedEvent> get changes => _changes.stream;
+
+  /// Avisa (broadcast) cada vez que [configurarEnrutamiento] cambia las
+  /// reglas del TPV, para que los comanderos pidan el snapshot de nuevo.
+  Stream<void> get enrutamientoChanges => _enrutamientoChanges.stream;
 
   /// Registra un receptor de efectos.
   void addEffects(SalaEffects effects) => _effects.add(effects);
@@ -86,12 +92,20 @@ final class SalaService {
     if (decimales != null) _decimales = decimales;
   }
 
-  /// Enrutamiento de comandas vigente (familia → cocina/barra).
+  /// Enrutamiento de comandas configurado en el TPV (familia → cocina/barra),
+  /// sin los destinos del ERP.
   EnrutamientoComandas get enrutamiento => _enrutamiento;
+
+  /// Enrutamiento que aplica el host: el del TPV con los destinos de las
+  /// familias del ERP (`familias.tpv_destino`) incorporados por nivel. Es el
+  /// que se publica a los comanderos en el snapshot de sala.
+  EnrutamientoComandas get enrutamientoEfectivo =>
+      _enrutamiento.conDestinosErp(_catalog.catalogo?.familias ?? const []);
 
   /// Sustituye el enrutamiento en caliente. Se aplica a las líneas que se
   /// acepten a partir de ahora (las ya aceptadas conservan su destino: ya
-  /// se imprimieron) y viaja en los snapshots siguientes.
+  /// se imprimieron) y viaja en los snapshots siguientes; se avisa por
+  /// [enrutamientoChanges] para que los comanderos conectados lo pidan.
   void configurarEnrutamiento(EnrutamientoComandas enrutamiento) {
     if (enrutamiento == _enrutamiento) return;
     _enrutamiento = enrutamiento;
@@ -99,16 +113,20 @@ final class SalaService {
       'Enrutamiento de comandas: ${enrutamiento.porFamilia.length} reglas, '
       'por defecto ${enrutamiento.porDefecto.name}',
     );
+    if (!_enrutamientoChanges.isClosed) _enrutamientoChanges.add(null);
   }
 
   /// Destino de preparación que el host asigna a un artículo de
-  /// [codfamilia], heredando por la jerarquía de familias del catálogo.
-  DestinoPreparacion destinoDe(String? codfamilia) => _enrutamiento.destinoDe(
-    codfamilia,
-    madreDe: EnrutamientoComandas.jerarquia(
-      _catalog.catalogo?.familias ?? const [],
-    ),
-  );
+  /// [codfamilia], heredando por la jerarquía de familias del catálogo con
+  /// las reglas del TPV y los destinos del ERP.
+  DestinoPreparacion destinoDe(String? codfamilia) {
+    final familias = _catalog.catalogo?.familias ?? const [];
+    return _enrutamiento.destinoDe(
+      codfamilia,
+      madreDe: EnrutamientoComandas.jerarquia(familias),
+      erp: EnrutamientoComandas.destinosErp(familias),
+    );
+  }
 
   /// Sustituye la configuración de mesas. Las comandas abiertas se conservan
   /// aunque su mesa desaparezca de la lista (se cobran o vacían después).
@@ -135,7 +153,7 @@ final class SalaService {
     comandas: comandas,
     catalogoVersion: _catalog.version,
     generadoEn: _now(),
-    enrutamiento: _enrutamiento,
+    enrutamiento: enrutamientoEfectivo,
   );
 
   // ---------------------------------------------------------------------------
@@ -185,12 +203,12 @@ final class SalaService {
     final existentes = _idsLineasDelTurno();
     final candidatas = <LineaComanda>[];
     final corregidas = <String>[];
-    final madreDe = EnrutamientoComandas.jerarquia(
-      _catalog.catalogo?.familias ?? const [],
-    );
+    final familias = _catalog.catalogo?.familias ?? const [];
+    final madreDe = EnrutamientoComandas.jerarquia(familias);
+    final erp = EnrutamientoComandas.destinosErp(familias);
     for (final linea in payload.lineas) {
       if (existentes.contains(linea.id)) continue;
-      final normalizada = _normalizarLinea(linea, corregidas, madreDe);
+      final normalizada = _normalizarLinea(linea, corregidas, madreDe, erp);
       candidatas.add(
         normalizada.estado == EstadoLinea.anulada
             ? normalizada.copyWith(estado: EstadoLinea.enviada)
@@ -623,19 +641,22 @@ final class SalaService {
   /// Valida la línea y, con catálogo, fija precio, IVA y `codimpuesto` del
   /// artículo (el host es la autoridad de precios) y el destino de
   /// preparación según el enrutamiento por familias ([madreDe] es la
-  /// jerarquía de familias del catálogo). Añade a [corregidas] la
-  /// descripción de las líneas cuyo precio o impuesto difería; un destino
-  /// distinto no se avisa (el comandero puede no conocer el enrutamiento).
+  /// jerarquía de familias del catálogo y [erp] sus destinos en el ERP).
+  /// Añade a [corregidas] la descripción de las líneas cuyo precio o
+  /// impuesto difería; un destino distinto no se avisa (el comandero puede
+  /// no conocer el enrutamiento).
   LineaComanda _normalizarLinea(
     LineaComanda linea,
     List<String> corregidas,
     Map<String, String?> madreDe,
+    Map<String, DestinoPreparacion> erp,
   ) {
     final articulo = _validarLinea(linea);
     if (articulo == null) return linea;
     final destino = _enrutamiento.destinoDe(
       articulo.codfamilia,
       madreDe: madreDe,
+      erp: erp,
     );
     if (destino != linea.destino) {
       _log.fine(
@@ -753,5 +774,6 @@ final class SalaService {
   Future<void> dispose() async {
     await idle();
     await _changes.close();
+    await _enrutamientoChanges.close();
   }
 }

@@ -167,11 +167,25 @@ final class ComanderoController {
       _sala?.enrutamiento ?? _config.enrutamiento;
 
   /// Destino de preparación (cocina/barra) de un artículo de [codfamilia]
-  /// según [enrutamiento], heredando por las familias del catálogo.
-  DestinoPreparacion destinoDe(String? codfamilia) => enrutamiento.destinoDe(
-    codfamilia,
-    madreDe: EnrutamientoComandas.jerarquia(_catalogo?.familias ?? const []),
-  );
+  /// según [enrutamiento], heredando por las familias del catálogo y con los
+  /// destinos del ERP que trae el catálogo. El host publica su enrutamiento
+  /// efectivo con los destinos del ERP ya aplanados como reglas del TPV, y
+  /// esas reglas mandan sobre el ERP del mismo nivel: volver a aplicar el ERP
+  /// solo es neutro si el snapshot y el catálogo son de la MISMA versión. Por
+  /// eso, tras cargar un catálogo de otra versión (`catalogo.changed`) o
+  /// cuando el host avisa de reglas nuevas (`enrutamiento.changed`), el
+  /// comandero vuelve a pedir el snapshot; mientras llega puede calcular el
+  /// destino antiguo (el host lo corrige al aceptar la línea). Aplicar el ERP
+  /// aquí cubre el enrutamiento local de reserva y los hosts que no lo
+  /// publican.
+  DestinoPreparacion destinoDe(String? codfamilia) {
+    final familias = _catalogo?.familias ?? const [];
+    return enrutamiento.destinoDe(
+      codfamilia,
+      madreDe: EnrutamientoComandas.jerarquia(familias),
+      erp: EnrutamientoComandas.destinosErp(familias),
+    );
+  }
 
   Comanda? comandaDe(String mesaId) => _sala?.comandaDeMesa(mesaId);
 
@@ -989,6 +1003,52 @@ final class ComanderoController {
     if (!_vigente(sesion)) return;
     if (!cargado) _programarReintentoCatalogo(sesion);
     if (_sesionLista) _emitirConectado();
+    // El enrutamiento del snapshot lleva aplanados los destinos del ERP del
+    // catálogo con el que se generó: si es de otra versión que el recién
+    // cargado, se pide de nuevo (si no, una regla aplanada antigua taparía el
+    // `tpv_destino` nuevo del catálogo). Si el host ya anuncia otra versión,
+    // lo hará la carga de esa versión.
+    final sala = _sala;
+    if (cargado &&
+        sala != null &&
+        _catalogoVersion == _catalogoVersionHost &&
+        sala.catalogoVersion != _catalogoVersion) {
+      await _refrescarSalaEnSesion(sesion, 'tras cambiar el catálogo');
+    }
+  }
+
+  /// Número de intentos de [_refrescarSalaEnSesion] antes de rendirse (el
+  /// siguiente `welcome` vuelve a pedir el snapshot de todos modos).
+  static const int _intentosRefrescoSala = 3;
+
+  /// Vuelve a pedir el snapshot de sala dentro de la sesión [sesion] (sin
+  /// lanzar: los fallos se registran y se reintenta unas pocas veces). Lo
+  /// usan `catalogo.changed` y `enrutamiento.changed` para que el
+  /// enrutamiento efectivo del host esté al día.
+  Future<void> _refrescarSalaEnSesion(int sesion, String motivo) async {
+    for (var intento = 1; intento <= _intentosRefrescoSala; intento++) {
+      if (!_vigente(sesion)) return;
+      final ProtocolMessage ack;
+      try {
+        ack = await _client.request(SalaMessageTypes.salaSnapshotGet, const {});
+      } on NetworkException {
+        return; // la sesión cayó: el próximo welcome lo vuelve a pedir
+      } on AppException catch (error) {
+        _log.warning('No se pudo refrescar la sala ($motivo): $error');
+        await Future<void>.delayed(reintentoCargaSala);
+        continue;
+      }
+      if (!_vigente(sesion)) return;
+      try {
+        _sala = SalaSnapshot.fromJson(ack.payload);
+      } on FormatException catch (error) {
+        _log.warning('Snapshot de sala inválido ($motivo): ${error.message}');
+        await Future<void>.delayed(reintentoCargaSala);
+        continue;
+      }
+      _emitirConectado();
+      return;
+    }
   }
 
   void _onMessage(ProtocolMessage message) {
@@ -1019,6 +1079,13 @@ final class ComanderoController {
         _reintentoCatalogo?.cancel();
         _reintentoCatalogo = null;
         unawaited(_recargarCatalogo(sesion));
+      case SalaMessageTypes.enrutamientoChanged:
+        // Reglas del TPV nuevas: el enrutamiento efectivo viaja en el
+        // snapshot. Se pide aunque la sesión aún no esté lista (el snapshot
+        // de `_onSesionAbierta` pudo responderse antes del cambio).
+        unawaited(
+          _refrescarSalaEnSesion(_sesion, 'tras cambiar el enrutamiento'),
+        );
       default:
         _log.fine("Mensaje '${message.type}' del host sin manejador");
     }

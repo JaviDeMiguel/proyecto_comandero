@@ -1,4 +1,5 @@
 import 'package:proyecto_comandero/core/errors/app_exception.dart';
+import 'package:proyecto_comandero/core/facturascripts/catalog/catalog_models.dart';
 import 'package:proyecto_comandero/features/host/application/sala_effects.dart';
 import 'package:proyecto_comandero/features/sala/domain/comanda.dart';
 import 'package:proyecto_comandero/features/sala/domain/enrutamiento_comandas.dart';
@@ -808,6 +809,102 @@ void main() {
       final snapshot = g.sala.snapshot();
       expect(snapshot.enrutamiento, bebidasABarra);
       expect(SalaSnapshot.fromJson(snapshot.toJson()), snapshot);
+    });
+
+    test('configurarEnrutamiento avisa por enrutamientoChanges solo si '
+        'cambian las reglas', () async {
+      await crear(const EnrutamientoComandas());
+      var avisos = 0;
+      final sub = g.sala.enrutamientoChanges.listen((_) => avisos++);
+      addTearDown(sub.cancel);
+
+      g.sala.configurarEnrutamiento(const EnrutamientoComandas());
+      await Future<void>.delayed(Duration.zero);
+      expect(avisos, 0, reason: 'mismas reglas');
+
+      g.sala.configurarEnrutamiento(bebidasABarra);
+      await Future<void>.delayed(Duration.zero);
+      expect(avisos, 1);
+      g.sala.configurarEnrutamiento(bebidasABarra);
+      await Future<void>.delayed(Duration.zero);
+      expect(avisos, 1);
+    });
+
+    test('aplica los destinos del ERP (familias.tpv_destino) por nivel y '
+        'publica el enrutamiento efectivo a los comanderos', () async {
+      // ERP: Bebidas → barra, Cafés → cocina, Postres → barra.
+      final conErp = CatalogSnapshot(
+        familias: [
+          for (final f in cat.familias)
+            FamiliaCatalogo(
+              codfamilia: f.codfamilia,
+              descripcion: f.descripcion,
+              madre: f.madre,
+              destino: switch (f.codfamilia) {
+                'BEB' || 'POS' => 'barra',
+                'CAF' => 'cocina',
+                _ => null,
+              },
+            ),
+        ],
+        impuestos: cat.impuestos,
+        articulos: cat.articulos,
+        avisos: const [],
+        obtenidoEn: cat.obtenidoEn,
+      );
+      // Regla del TPV: los postres, en cocina (sobrescribe el ERP).
+      const reglas = EnrutamientoComandas(
+        porFamilia: {'POS': DestinoPreparacion.cocina},
+      );
+      g = await SalaFixture.create(catalogo: conErp, enrutamiento: reglas);
+      final result = await g.sala.aceptarLineas(
+        submit('m1', [
+          for (final (i, ref) in [
+            'CANA',
+            'CAFE',
+            'AGUA',
+            'FLAN',
+            'PAELLA',
+            'PAN',
+          ].indexed)
+            linea('l$i', ref, 1, catalogo: conErp),
+        ]),
+      );
+      expect(destinos(result.comanda), {
+        'CANA': DestinoPreparacion.barra, // hereda el ERP de Bebidas
+        'CAFE': DestinoPreparacion.cocina, // ERP propio de Cafés
+        'AGUA': DestinoPreparacion.barra, // ERP de Bebidas
+        'FLAN': DestinoPreparacion.cocina, // regla del TPV sobre el ERP
+        'PAELLA': DestinoPreparacion.cocina, // por defecto
+        'PAN': DestinoPreparacion.cocina, // sin familia
+      });
+      expect(g.sala.destinoDe('CER'), DestinoPreparacion.barra);
+
+      // Las reglas guardadas no cambian; el snapshot lleva el efectivo.
+      expect(g.sala.enrutamiento, reglas);
+      final publicado = g.sala.snapshot().enrutamiento!;
+      expect(publicado, g.sala.enrutamientoEfectivo);
+      expect(publicado.porFamilia, {
+        'BEB': DestinoPreparacion.barra,
+        'CER': DestinoPreparacion.barra,
+        'CAF': DestinoPreparacion.cocina,
+        'POS': DestinoPreparacion.cocina,
+      });
+      // Un comandero sin jerarquía ni destinos del ERP resuelve igual que
+      // el host, y uno con el catálogo completo también.
+      final madreDe = EnrutamientoComandas.jerarquia(conErp.familias);
+      final erp = EnrutamientoComandas.destinosErp(conErp.familias);
+      for (final articulo in conErp.articulos) {
+        final enHost = g.sala.destinoDe(articulo.codfamilia);
+        expect(publicado.destinoDe(articulo.codfamilia), enHost);
+        expect(
+          publicado.destinoDe(articulo.codfamilia, madreDe: madreDe, erp: erp),
+          enHost,
+        );
+      }
+      final recibido = SalaSnapshot.fromJson(g.sala.snapshot().toJson())
+          .enrutamiento;
+      expect(recibido, publicado);
     });
 
     test('sin catálogo se conserva el destino recibido', () async {

@@ -1,0 +1,322 @@
+{#
+    This file is part of Hosteleria plugin for FacturaScripts.
+    Página "Configurar TPV": comprobaciones, usuario de MySQL, resumen para la app y carta de ejemplo.
+#}
+{% extends "Master/MenuTemplate.html.twig" %}
+
+{% block body %}
+    {% set pageData = fsc.getPageData() %}
+    <div class="container-fluid mt-3 mb-5">
+        <div class="row mb-3">
+            <div class="col">
+                <h1 class="h3 mb-1">
+                    <i class="{{ pageData.icon }} me-2" aria-hidden="true"></i>{{ trans('tpv-setup') }}
+                </h1>
+                <p class="text-muted mb-0">{{ trans('tpv-setup-intro') }}</p>
+            </div>
+            <div class="col-auto">
+                <a class="btn btn-sm btn-secondary" href="{{ fsc.url() }}" title="{{ trans('refresh') }}">
+                    <i class="fa-solid fa-redo" aria-hidden="true"></i>
+                </a>
+            </div>
+        </div>
+
+        {% if fsc.esAdmin %}
+            {% set estados = {
+                'ok': {'clase': 'success', 'icono': 'fa-solid fa-circle-check', 'texto': trans('tpv-status-ok')},
+                'aviso': {'clase': 'warning', 'icono': 'fa-solid fa-triangle-exclamation', 'texto': trans('tpv-status-warning')},
+                'error': {'clase': 'danger', 'icono': 'fa-solid fa-circle-xmark', 'texto': trans('tpv-status-error')}
+            } %}
+
+            {# ---------------------------------------------------------------- comprobaciones #}
+            <div class="card shadow-sm mb-4">
+                <div class="card-header d-flex align-items-center">
+                    <strong class="me-auto"><i class="fa-solid fa-list-check me-2" aria-hidden="true"></i>{{ trans('tpv-checks') }}</strong>
+                    <form method="post" action="{{ fsc.url() }}" class="d-inline">
+                        {{ formToken() }}
+                        <input type="hidden" name="action" value="tpv-fix"/>
+                        <input type="hidden" name="fix" value="setup-all"/>
+                        <button type="submit" class="btn btn-sm btn-primary" title="{{ trans('tpv-action-setup-all-desc') }}">
+                            <i class="fa-solid fa-wand-magic-sparkles me-1" aria-hidden="true"></i>{{ trans('tpv-action-setup-all') }}
+                        </button>
+                    </form>
+                </div>
+                <ul class="list-group list-group-flush">
+                    {% for check in fsc.comprobaciones %}
+                        {% set e = estados[check.estado] %}
+                        <li class="list-group-item" id="tpv-check-{{ check.id }}">
+                            <div class="d-flex flex-wrap align-items-start gap-2">
+                                <span class="badge bg-{{ e.clase }} mt-1" style="min-width: 4.5rem;">
+                                    <i class="{{ e.icono }} me-1" aria-hidden="true"></i>{{ e.texto }}
+                                </span>
+                                <div class="flex-grow-1" style="min-width: 16rem;">
+                                    <div class="fw-bold">{{ check.titulo }}</div>
+                                    <div>{{ check.mensaje }}</div>
+                                    {% if check.detalles is not empty %}
+                                        <ul class="small text-muted mb-0 ps-3">
+                                            {% for detalle in check.detalles %}
+                                                <li>{{ detalle }}</li>
+                                            {% endfor %}
+                                        </ul>
+                                    {% endif %}
+                                    {% if check.clave %}
+                                        <div class="input-group input-group-sm mt-2" style="max-width: 32rem;">
+                                            <span class="input-group-text">{{ trans('tpv-api-key') }}</span>
+                                            <input type="text" class="form-control font-monospace" id="tpvApiKey"
+                                                   value="{{ check.clave }}" readonly onfocus="this.select();"/>
+                                            <button type="button" class="btn btn-outline-secondary" onclick="tpvCopy('tpvApiKey', this);"
+                                                    title="{{ trans('tpv-copy') }}">
+                                                <i class="fa-regular fa-copy" aria-hidden="true"></i>
+                                            </button>
+                                        </div>
+                                    {% endif %}
+                                </div>
+                                <div class="d-flex flex-wrap gap-1">
+                                    {% for accion in check.acciones %}
+                                        <form method="post" action="{{ fsc.url() }}#tpv-check-{{ check.id }}" class="d-inline"
+                                              {% if accion.confirmar %}onsubmit="return confirm(this.dataset.confirm);" data-confirm="{{ accion.confirmar }}"{% endif %}>
+                                            {{ formToken() }}
+                                            <input type="hidden" name="action" value="tpv-fix"/>
+                                            <input type="hidden" name="fix" value="{{ accion.accion }}"/>
+                                            {% if accion.confirmar %}
+                                                <input type="hidden" name="confirm" value="1"/>
+                                            {% endif %}
+                                            <button type="submit" class="btn btn-sm btn-{{ accion.estilo }}">{{ accion.texto }}</button>
+                                        </form>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                        </li>
+                    {% endfor %}
+                </ul>
+                <div class="card-footer small text-muted">
+                    {{ trans('tpv-api-permissions-help') }}
+                    <details class="mt-1">
+                        <summary>{{ trans('tpv-api-permissions') }}</summary>
+                        <div class="row row-cols-1 row-cols-md-3 g-0 mt-1">
+                            {% for recurso, metodos in fsc.permisosApi() %}
+                                <div class="col"><code>{{ recurso }}</code>: {{ metodos }}</div>
+                            {% endfor %}
+                        </div>
+                    </details>
+                </div>
+            </div>
+
+            {# ---------------------------------------------------------------- usuario de MySQL #}
+            {% set resumen = fsc.resumen() %}
+            <div class="card shadow-sm mb-4" id="tpv-mysql">
+                <div class="card-header">
+                    <strong><i class="fa-solid fa-database me-2" aria-hidden="true"></i>{{ trans('tpv-mysql-user') }}</strong>
+                </div>
+                <div class="card-body">
+                    <p class="mb-3">{{ trans('tpv-mysql-intro') }}</p>
+                    {% if resumen.dbType != 'mysql' %}
+                        <div class="alert alert-warning mb-0">{{ trans('tpv-mysql-only') }}</div>
+                    {% else %}
+                        <form method="post" action="{{ fsc.url() }}#tpv-mysql" class="row g-2 align-items-end">
+                            {{ formToken() }}
+                            <input type="hidden" name="action" value="mysql-generate"/>
+                            <div class="col-sm-4 col-lg-3">
+                                <label class="form-label" for="mysql_user">{{ trans('tpv-mysql-username') }}</label>
+                                <input type="text" class="form-control" id="mysql_user" name="mysql_user" maxlength="32"
+                                       pattern="[A-Za-z0-9_]{1,32}" required value="{{ fsc.mysqlForm.usuario }}"/>
+                            </div>
+                            <div class="col-sm-4 col-lg-3">
+                                <label class="form-label" for="mysql_host">{{ trans('tpv-mysql-host') }}</label>
+                                <input type="text" class="form-control" id="mysql_host" name="mysql_host" maxlength="255"
+                                       pattern="[A-Za-z0-9.%_:\-]{1,255}" required value="{{ fsc.mysqlForm.host }}"/>
+                            </div>
+                            <div class="col-sm-4 col-lg-3">
+                                <div class="form-check mb-2">
+                                    <input class="form-check-input" type="checkbox" id="mysql_tls" name="mysql_tls" value="1"
+                                           {{ fsc.mysqlForm.tls ? 'checked' : '' }}/>
+                                    <label class="form-check-label" for="mysql_tls">{{ trans('tpv-mysql-require-tls') }}</label>
+                                </div>
+                            </div>
+                            <div class="col-sm-12 col-lg-3">
+                                <button type="submit" class="btn btn-primary w-100">
+                                    <i class="fa-solid fa-key me-1" aria-hidden="true"></i>{{ trans('tpv-mysql-generate') }}
+                                </button>
+                            </div>
+                            <div class="col-12 form-text">{{ trans('tpv-mysql-host-help') }}</div>
+                        </form>
+
+                        {% if fsc.mysql %}
+                            <hr/>
+                            <div class="alert alert-info">{{ trans('tpv-mysql-password-once') }}</div>
+                            <div class="input-group mb-3" style="max-width: 36rem;">
+                                <span class="input-group-text">{{ trans('password') }}</span>
+                                <input type="text" class="form-control font-monospace" id="tpvMysqlPassword"
+                                       value="{{ fsc.mysql.password }}" readonly onfocus="this.select();"/>
+                                <button type="button" class="btn btn-outline-secondary" onclick="tpvCopy('tpvMysqlPassword', this);"
+                                        title="{{ trans('tpv-copy') }}">
+                                    <i class="fa-regular fa-copy" aria-hidden="true"></i>
+                                </button>
+                            </div>
+                            <label class="form-label" for="tpvMysqlScript">{{ trans('tpv-mysql-statements') }}</label>
+                            <textarea class="form-control font-monospace small mb-2" id="tpvMysqlScript" rows="12"
+                                      readonly>{{ fsc.mysql.script() }}</textarea>
+                            <div class="d-flex flex-wrap gap-2">
+                                <button type="button" class="btn btn-outline-secondary" onclick="tpvCopy('tpvMysqlScript', this);">
+                                    <i class="fa-regular fa-copy me-1" aria-hidden="true"></i>{{ trans('tpv-copy') }}
+                                </button>
+                                <form method="post" action="{{ fsc.url() }}#tpv-mysql" class="d-inline-flex flex-wrap align-items-center gap-2"
+                                      onsubmit="return confirm(this.reset_password.checked ? this.dataset.confirmReset : this.dataset.confirm);"
+                                      data-confirm="{{ trans('tpv-confirm-mysql-execute', {'%account%': fsc.mysql.cuenta()}) }}"
+                                      data-confirm-reset="{{ trans('tpv-confirm-mysql-reset', {'%account%': fsc.mysql.cuenta()}) }}">
+                                    {{ formToken() }}
+                                    <input type="hidden" name="action" value="mysql-execute"/>
+                                    <input type="hidden" name="confirm" value="1"/>
+                                    <input type="hidden" name="mysql_user" value="{{ fsc.mysql.usuario }}"/>
+                                    <input type="hidden" name="mysql_host" value="{{ fsc.mysql.host }}"/>
+                                    <input type="hidden" name="mysql_tls" value="{{ fsc.mysql.tls ? '1' : '0' }}"/>
+                                    <input type="hidden" name="password" value="{{ fsc.mysql.password }}"/>
+                                    <button type="submit" class="btn btn-warning">
+                                        <i class="fa-solid fa-play me-1" aria-hidden="true"></i>{{ trans('tpv-mysql-execute') }}
+                                    </button>
+                                    <div class="form-check mb-0">
+                                        <input class="form-check-input" type="checkbox" id="reset_password" name="reset_password" value="1"/>
+                                        <label class="form-check-label" for="reset_password">{{ trans('tpv-mysql-reset-password') }}</label>
+                                    </div>
+                                </form>
+                            </div>
+                            <div class="form-text">{{ trans('tpv-mysql-execute-help') }}</div>
+                        {% endif %}
+
+                        {% if fsc.mysqlResultado is not empty %}
+                            <div class="alert alert-{{ fsc.mysqlResultado[0] ? 'success' : 'danger' }} mt-3 mb-0">
+                                {{ fsc.mysqlResultado[1] }}
+                            </div>
+                        {% endif %}
+                    {% endif %}
+                </div>
+            </div>
+
+            {# ---------------------------------------------------------------- resumen para la app #}
+            <div class="card shadow-sm mb-4" id="tpv-summary">
+                <div class="card-header">
+                    <strong><i class="fa-solid fa-mobile-screen me-2" aria-hidden="true"></i>{{ trans('tpv-summary') }}</strong>
+                </div>
+                <div class="card-body">
+                    <p>{{ trans('tpv-summary-intro') }}</p>
+                    <div class="row">
+                        <div class="col-lg-6">
+                            <h2 class="h6">{{ trans('tpv-summary-api') }}</h2>
+                            <table class="table table-sm">
+                                <tr>
+                                    <th class="w-50">{{ trans('tpv-app-base-url') }}</th>
+                                    <td>
+                                        <code>{{ resumen.url }}</code>
+                                        {% if resumen.urlLocal %}
+                                            <div class="small text-danger">{{ trans('tpv-app-url-local') }}</div>
+                                            {% if resumen.urlSugerida %}
+                                                <div class="small text-muted">{{ trans('tpv-app-url-suggested') }} <code>{{ resumen.urlSugerida }}</code></div>
+                                            {% endif %}
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <th>{{ trans('tpv-api-root') }}</th>
+                                    <td>
+                                        <code>{{ resumen.api }}</code>
+                                        {% if resumen.apiSugerida %}
+                                            <div class="small text-muted">{{ trans('tpv-app-url-suggested') }} <code>{{ resumen.apiSugerida }}</code></div>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <th>{{ trans('tpv-app-api-token') }}</th>
+                                    <td>{% if resumen.clave %}<code>{{ resumen.clave }}</code>{% else %}<span class="text-danger">{{ trans('tpv-summary-no-key') }}</span>{% endif %}</td>
+                                </tr>
+                                <tr><th>{{ trans('tpv-app-serie') }}</th><td><code>{{ resumen.codserie }}</code></td></tr>
+                                <tr><th>{{ trans('tpv-app-customer') }}</th><td><code>{{ resumen.codcliente }}</code></td></tr>
+                                <tr><th>{{ trans('tpv-app-warehouse') }}</th><td><code>{{ resumen.codalmacen }}</code></td></tr>
+                                <tr><th>{{ trans('tpv-app-company') }}</th><td><code>{{ resumen.idempresa }}</code></td></tr>
+                                <tr><th>{{ trans('tpv-app-cash') }}</th><td><code>{{ resumen.efectivo }}</code></td></tr>
+                                <tr><th>{{ trans('tpv-app-card') }}</th><td><code>{{ resumen.tarjeta }}</code></td></tr>
+                            </table>
+                        </div>
+                        <div class="col-lg-6">
+                            <h2 class="h6">{{ trans('tpv-summary-mysql') }}</h2>
+                            <table class="table table-sm">
+                                <tr>
+                                    <th class="w-50">{{ trans('tpv-app-db-host') }}</th>
+                                    <td>
+                                        <code>{{ resumen.dbHost }}</code>
+                                        {% if resumen.dbHostLocal %}
+                                            <div class="small text-muted">{{ trans('tpv-app-db-host-local') }}</div>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                <tr><th>{{ trans('tpv-app-db-port') }}</th><td><code>{{ resumen.dbPort }}</code></td></tr>
+                                <tr><th>{{ trans('tpv-app-db-name') }}</th><td><code>{{ resumen.dbName }}</code></td></tr>
+                                <tr><th>{{ trans('tpv-app-db-user') }}</th><td><code>{{ resumen.dbUser }}</code></td></tr>
+                                <tr><th>{{ trans('password') }}</th><td>{{ trans('tpv-app-db-password') }}</td></tr>
+                                <tr><th>{{ trans('tpv-app-db-tls') }}</th><td>{{ trans('tpv-app-db-tls-help') }}</td></tr>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            {# ---------------------------------------------------------------- carta de ejemplo #}
+            {% set totales = fsc.totalesCarta() %}
+            <div class="card shadow-sm mb-4" id="tpv-menu">
+                <div class="card-header">
+                    <strong><i class="fa-solid fa-utensils me-2" aria-hidden="true"></i>{{ trans('tpv-sample-menu') }}</strong>
+                </div>
+                <div class="card-body">
+                    <p>{{ trans('tpv-sample-menu-intro', {'%families%': totales.familias, '%products%': totales.productos, '%ingredients%': totales.materias, '%suppliers%': totales.proveedores, '%recipes%': totales.escandallos}) }}</p>
+                    <form method="post" action="{{ fsc.url() }}#tpv-menu"
+                          onsubmit="return confirm(this.dataset.confirm);" data-confirm="{{ trans('tpv-confirm-load-menu') }}">
+                        {{ formToken() }}
+                        <input type="hidden" name="action" value="load-menu"/>
+                        <button type="submit" class="btn btn-success">
+                            <i class="fa-solid fa-utensils me-1" aria-hidden="true"></i>{{ trans('tpv-load-sample-menu') }}
+                        </button>
+                    </form>
+                    {% if fsc.resumenCarta is not empty %}
+                        <table class="table table-sm mt-3" style="max-width: 32rem;">
+                            <thead>
+                            <tr>
+                                <th></th>
+                                <th class="text-end">{{ trans('tpv-created') }}</th>
+                                <th class="text-end">{{ trans('tpv-already-existed') }}</th>
+                            </tr>
+                            </thead>
+                            {% for clave, valores in fsc.resumenCarta %}
+                                <tr>
+                                    <td>{{ trans('tpv-menu-' ~ clave) }}</td>
+                                    <td class="text-end">{{ valores[0] }}</td>
+                                    <td class="text-end">{{ valores[1] }}</td>
+                                </tr>
+                            {% endfor %}
+                        </table>
+                    {% endif %}
+                </div>
+            </div>
+        {% endif %}
+    </div>
+
+    <script>
+        function tpvCopy(id, button) {
+            const field = document.getElementById(id);
+            if (!field) {
+                return;
+            }
+            field.select();
+            const done = function () {
+                button.classList.add('btn-success');
+                setTimeout(function () {
+                    button.classList.remove('btn-success');
+                }, 1200);
+            };
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(field.value).then(done);
+            } else {
+                document.execCommand('copy');
+                done();
+            }
+        }
+    </script>
+{% endblock %}

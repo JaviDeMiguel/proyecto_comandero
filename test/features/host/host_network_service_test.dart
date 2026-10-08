@@ -10,6 +10,8 @@ import 'package:proyecto_comandero/core/network/protocol/transport_messages.dart
 import 'package:proyecto_comandero/core/network/tcp/tcp_comandero_client.dart';
 import 'package:proyecto_comandero/core/network/tcp/tcp_host_server.dart';
 import 'package:proyecto_comandero/features/host/application/host_network_service.dart';
+import 'package:proyecto_comandero/features/sala/domain/enrutamiento_comandas.dart';
+import 'package:proyecto_comandero/features/sala/domain/linea_comanda.dart';
 import 'package:proyecto_comandero/features/sala/domain/ticket.dart';
 import 'package:proyecto_comandero/features/sala/protocol/sala_messages.dart';
 import 'package:test/test.dart';
@@ -207,6 +209,27 @@ void main() {
       expect(libre.comanda, isNull);
     },
   );
+
+  test('configurarEnrutamiento difunde enrutamiento.changed y el snapshot '
+      'siguiente lleva las reglas nuevas', () async {
+    final a = await conectar('a');
+    final eventos = Inbox<ProtocolMessage>(a.messages);
+    addTearDown(eventos.cancel);
+
+    const nuevas = EnrutamientoComandas(
+      porFamilia: {'PLA': DestinoPreparacion.barra},
+    );
+    f.sala.configurarEnrutamiento(nuevas);
+    final aviso = await eventos.next(what: 'enrutamiento.changed');
+    expect(aviso.type, SalaMessageTypes.enrutamientoChanged);
+    expect(aviso.payload, isEmpty);
+
+    final snapshot = SalaSnapshot.fromJson(
+      (await a.request(SalaMessageTypes.salaSnapshotGet, {})).payload,
+    );
+    expect(snapshot.enrutamiento, f.sala.enrutamientoEfectivo);
+    expect(snapshot.enrutamiento!.porFamilia['PLA'], DestinoPreparacion.barra);
+  });
 
   test(
     'errores de negocio y de formato viajan como error no reintentable',

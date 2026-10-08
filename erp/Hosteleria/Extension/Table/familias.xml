@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+ * Plugin Hosteleria: destino de impresión de la comanda para los productos de la familia.
+ * Valores: 'cocina' | 'barra' | NULL (NULL = hereda de la familia madre y, si nadie lo
+ * define, el destino por defecto de la app). Lo lee el TPV en GET /api/3/familias.
+-->
+<table>
+    <column>
+        <name>tpv_destino</name>
+        <type>character varying(10)</type>
+    </column>
+</table>

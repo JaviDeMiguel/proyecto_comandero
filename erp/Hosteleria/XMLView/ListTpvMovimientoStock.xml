@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+ * Plugin Hosteleria: diario de movimientos de stock del TPV (solo lectura).
+ * Cantidad positiva = consumo (resta stock); negativa = devolución (anulación).
+-->
+<view>
+    <columns>
+        <column name="id" display="none" order="90">
+            <widget type="text" fieldname="id"/>
+        </column>
+        <column name="date" order="100">
+            <widget type="datetime" fieldname="creado"/>
+        </column>
+        <column name="operation" order="110">
+            <widget type="text" fieldname="operacion"/>
+        </column>
+        <column name="reference" order="120">
+            <widget type="variante" fieldname="referencia" match="referencia" onclick="EditProducto"/>
+        </column>
+        <column name="warehouse" order="130">
+            <widget type="select" fieldname="codalmacen">
+                <values source="almacenes" fieldcode="codalmacen" fieldtitle="nombre"/>
+            </widget>
+        </column>
+        <column name="quantity" display="right" order="140">
+            <widget type="number" fieldname="cantidad" decimal="3">
+                <option color="success">lt:0</option>
+            </widget>
+        </column>
+        <column name="reason" order="150">
+            <widget type="text" fieldname="motivo"/>
+        </column>
+        <column name="origin" order="160">
+            <widget type="text" fieldname="origen"/>
+        </column>
+    </columns>
+    <rows>
+        <row type="status">
+            <option color="success" title="tpv-stock-return" fieldname="motivo">anulacion</option>
+        </row>
+    </rows>
+</view>

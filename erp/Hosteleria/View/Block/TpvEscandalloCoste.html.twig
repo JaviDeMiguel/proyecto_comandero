@@ -1,0 +1,50 @@
+{#
+ * Plugin Hosteleria: resumen de coste teórico y margen de las variantes del producto.
+ * Datos: settings.tpvCoste de la vista EditTpvEscandalloProducto (Extension/Controller/EditProducto).
+#}
+{% set tpvView = fsc.views['EditTpvEscandalloProducto'] ?? null %}
+{% set tpvCoste = tpvView is not null ? (tpvView.settings['tpvCoste'] ?? []) : [] %}
+{% if tpvCoste is empty %}
+    <p class="text-muted mb-0">{{ trans('tpv-recipe-empty') }}</p>
+{% else %}
+    <div class="table-responsive">
+        <table class="table table-sm table-hover mb-0">
+            <thead>
+            <tr>
+                <th>{{ trans('tpv-dish') }}</th>
+                <th>{{ trans('description') }}</th>
+                <th class="text-end">{{ trans('tpv-recipe-lines') }}</th>
+                <th class="text-end">{{ trans('tpv-theoretical-cost') }}</th>
+                <th class="text-end">{{ trans('tpv-price-without-tax') }}</th>
+                <th class="text-end">{{ trans('margin') }}</th>
+                <th class="text-end">{{ trans('tpv-margin-pct') }}</th>
+                <th class="text-end">{{ trans('tpv-cost-pct') }}</th>
+            </tr>
+            </thead>
+            <tbody>
+            {% for item in tpvCoste %}
+                {% set css = item.margen < 0 ? 'table-danger' : (item.lineas == 0 ? 'table-warning' : '') %}
+                <tr class="{{ css }}">
+                    <td>{{ item.referencia }}</td>
+                    <td>{{ item.descripcion }}</td>
+                    <td class="text-end">{{ item.lineas }}</td>
+                    <td class="text-end">{{ money(item.coste) }}</td>
+                    <td class="text-end">{{ money(item.precio) }}</td>
+                    <td class="text-end">{{ money(item.margen) }}</td>
+                    <td class="text-end">{{ item.margen_pct is null ? '-' : number(item.margen_pct, 2) ~ ' %' }}</td>
+                    <td class="text-end">{{ item.coste_pct is null ? '-' : number(item.coste_pct, 2) ~ ' %' }}</td>
+                </tr>
+                {% if item.sin_coste is not empty %}
+                    <tr class="table-warning">
+                        <td colspan="8" class="small">
+                            <i class="fa-solid fa-triangle-exclamation fa-fw"></i>
+                            {{ trans('tpv-ingredients-without-cost', {'%refs%': item.sin_coste|join(', ')}) }}
+                        </td>
+                    </tr>
+                {% endif %}
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <p class="small text-muted mb-0 mt-2">{{ trans('tpv-cost-help') }}</p>
+{% endif %}

@@ -168,6 +168,38 @@ void main() {
     expect(CatalogSnapshot.fromJson(snapshot.toJson()), snapshot);
   }, skip: skip);
 
+  test('familias.tpv_destino (plugin de hostelería) llega al catálogo; se '
+      'salta si la columna no existe', () async {
+    final raw = await api.listAll(FsResources.familias, sortBy: 'codfamilia');
+    if (raw.isEmpty || !raw.any((r) => r.containsKey('tpv_destino'))) {
+      markTestSkipped(
+        'familias no tiene la columna tpv_destino (plugin de hostelería '
+        'no activo en este FacturaScripts)',
+      );
+      return;
+    }
+    final valores = {for (final r in raw) r['codfamilia']: r['tpv_destino']};
+    _log('familias.tpv_destino: $valores');
+    // Contrato: 'cocina' | 'barra' | NULL (FS puede servir '' como nulo).
+    for (final MapEntry(key: codfamilia, value: valor) in valores.entries) {
+      expect(
+        valor,
+        anyOf(isNull, '', 'cocina', 'barra'),
+        reason: 'tpv_destino de $codfamilia',
+      );
+    }
+
+    final snapshot = await FsCatalogService(api).cargar();
+    for (final familia in snapshot.familias) {
+      expect(
+        familia.destino,
+        FamiliaCatalogo.normalizarDestino(valores[familia.codfamilia]),
+        reason: familia.codfamilia,
+      );
+    }
+    expect(CatalogSnapshot.fromJson(snapshot.toJson()), snapshot);
+  }, skip: skip);
+
   test('diagnosticar(): la configuración sembrada no tiene errores', () async {
     final settings = await master.settingsDefault();
     final items = await master.diagnosticar(

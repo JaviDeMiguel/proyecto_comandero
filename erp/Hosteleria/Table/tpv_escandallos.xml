@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+ * Plugin Hosteleria: líneas de receta (escandallo) de cada plato.
+ *
+ * Declaración equivalente al DDL canónico de la app (proyecto_comandero/sql/tpv_schema.sql),
+ * que crea Lib/TpvSchema.php. Este XML lo usa el DbUpdater de FacturaScripts para COMPARAR
+ * la tabla real y debe producir CERO cambios tanto si la creó la app como si la creó el plugin:
+ *  - tipos según SHOW COLUMNS (int/serial, varchar(30), double, datetime) y mismos nulos/defaults;
+ *  - restricciones con los MISMOS nombres que el DDL (el DbUpdater borra las no declaradas);
+ *  - sin CHECK (ref_plato <> ref_ingrediente): MySQL 8 lo rechaza (errno 3823) en columnas con
+ *    ON UPDATE CASCADE; lo valida el modelo TpvEscandallo;
+ *  - el índice tpv_idx_escandallos_ingrediente y ON UPDATE CURRENT_TIMESTAMP no se pueden
+ *    expresar en XML (FS prefija "fs_" a los índices y solo gestiona esos): los pone el DDL.
+-->
+<table>
+    <column>
+        <name>id</name>
+        <type>serial</type>
+        <null>NO</null>
+    </column>
+    <column>
+        <name>ref_plato</name>
+        <type>character varying(30)</type>
+        <null>NO</null>
+    </column>
+    <column>
+        <name>ref_ingrediente</name>
+        <type>character varying(30)</type>
+        <null>NO</null>
+    </column>
+    <column>
+        <name>cantidad</name>
+        <type>double precision</type>
+        <null>NO</null>
+    </column>
+    <column>
+        <name>merma</name>
+        <type>double precision</type>
+        <null>NO</null>
+        <default>0</default>
+    </column>
+    <column>
+        <name>observaciones</name>
+        <type>character varying(255)</type>
+    </column>
+    <column>
+        <name>creado</name>
+        <type>datetime</type>
+        <null>NO</null>
+        <default>CURRENT_TIMESTAMP</default>
+    </column>
+    <column>
+        <name>actualizado</name>
+        <type>datetime</type>
+        <null>NO</null>
+        <default>CURRENT_TIMESTAMP</default>
+    </column>
+    <constraint>
+        <name>tpv_escandallos_pkey</name>
+        <type>PRIMARY KEY (id)</type>
+    </constraint>
+    <constraint>
+        <name>tpv_uniq_escandallos_plato_ingrediente</name>
+        <type>UNIQUE (ref_plato, ref_ingrediente)</type>
+    </constraint>
+    <constraint>
+        <name>tpv_chk_escandallos_cantidad</name>
+        <type>CHECK (cantidad &gt; 0)</type>
+    </constraint>
+    <constraint>
+        <name>tpv_chk_escandallos_merma</name>
+        <type>CHECK (merma &gt;= 0 AND merma &lt; 100)</type>
+    </constraint>
+    <constraint>
+        <name>tpv_fk_escandallos_plato</name>
+        <type>FOREIGN KEY (ref_plato) REFERENCES variantes (referencia) ON DELETE CASCADE ON UPDATE CASCADE</type>
+    </constraint>
+    <constraint>
+        <name>tpv_fk_escandallos_ingrediente</name>
+        <type>FOREIGN KEY (ref_ingrediente) REFERENCES variantes (referencia) ON DELETE RESTRICT ON UPDATE CASCADE</type>
+    </constraint>
+</table>

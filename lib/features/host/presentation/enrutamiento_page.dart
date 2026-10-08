@@ -66,7 +66,27 @@ String nombreDestino(DestinoPreparacion destino) => switch (destino) {
   DestinoPreparacion.barra => 'Barra',
 };
 
-/// Opción del selector de cada familia: un destino propio o heredar.
+/// Explica de dónde sale el destino de [codfamilia] según [resolucion]:
+/// `Regla del TPV`, `ERP`, `Heredado de <familia> (ERP | regla del TPV)` o
+/// `Por defecto`. [nombreFamilia] traduce códigos a descripciones.
+String textoOrigen(
+  String codfamilia,
+  ResolucionDestino resolucion,
+  String Function(String codfamilia) nombreFamilia,
+) {
+  final desde = resolucion.familia;
+  return switch (resolucion.origen) {
+    OrigenDestino.porDefecto => 'Por defecto',
+    OrigenDestino.reglaTpv when desde == codfamilia => 'Regla del TPV',
+    OrigenDestino.erp when desde == codfamilia => 'ERP',
+    OrigenDestino.reglaTpv =>
+      'Heredado de ${nombreFamilia(desde!)} (regla del TPV)',
+    OrigenDestino.erp => 'Heredado de ${nombreFamilia(desde!)} (ERP)',
+  };
+}
+
+/// Opción del selector de cada familia: un destino propio del TPV o no
+/// tener regla (heredar de la madre o usar el destino del ERP).
 enum _Opcion { cocina, barra, heredar }
 
 _Opcion _opcionDe(DestinoPreparacion? regla) => switch (regla) {
@@ -85,10 +105,13 @@ DestinoPreparacion? _reglaDe(_Opcion opcion) => switch (opcion) {
 /// cocina y cuáles en barra.
 ///
 /// Muestra el árbol de familias del catálogo del host con un selector por
-/// familia (Cocina / Barra / Heredar) y el destino efectivo resultante, el
-/// destino por defecto y el estado de las impresoras de comandas. Guarda en
-/// los ajustes de impresión; el host lo aplica en caliente a las líneas que
-/// acepte a partir de entonces.
+/// familia (Cocina / Barra / Heredar, o ERP si la familia tiene destino en
+/// el ERP), el destino efectivo resultante y su origen (regla del TPV,
+/// ERP, heredado o por defecto), el destino por defecto y el estado de las
+/// impresoras de comandas. Las reglas del TPV sobrescriben el destino del
+/// ERP (`familias.tpv_destino`) de su nivel. Guarda en los ajustes de
+/// impresión; el host lo aplica en caliente a las líneas que acepte a
+/// partir de entonces.
 class EnrutamientoPage extends ConsumerStatefulWidget {
   const EnrutamientoPage({super.key});
 
@@ -152,7 +175,9 @@ class _EnrutamientoPageState extends ConsumerState<EnrutamientoPage> {
           children: [
             _EstadoImpresoras(
               impresion: ajustes.impresion,
-              enrutamiento: borrador,
+              enrutamiento: borrador.conDestinosErp(
+                catalogo?.familias ?? const [],
+              ),
             ),
             const SizedBox(height: 16),
             _PorDefecto(
@@ -178,6 +203,7 @@ class _EnrutamientoPageState extends ConsumerState<EnrutamientoPage> {
   ) {
     final theme = Theme.of(context);
     final madreDe = EnrutamientoComandas.jerarquia(catalogo.familias);
+    final erp = EnrutamientoComandas.destinosErp(catalogo.familias);
     final nombres = {
       for (final f in catalogo.familias) f.codfamilia: f.descripcion,
     };
@@ -192,9 +218,12 @@ class _EnrutamientoPageState extends ConsumerState<EnrutamientoPage> {
       Text('Familias del catálogo', style: theme.textTheme.titleMedium),
       const SizedBox(height: 4),
       Text(
-        'Una familia en "Heredar" usa el destino de su familia madre (o el '
-        'destino por defecto si no tiene). Los cambios se aplican a las '
-        'comandas que lleguen después de guardar.',
+        'Cocina o Barra fijan una regla del TPV, que manda sobre el destino '
+        'definido en FacturaScripts (ERP). Una familia en "Heredar" o "ERP" '
+        'no tiene regla del TPV: usa su destino del ERP o, si no tiene, el '
+        'de su familia madre (o el destino por defecto si ninguna lo '
+        'define). Los cambios se aplican a las comandas que lleguen después '
+        'de guardar.',
         style: theme.textTheme.bodySmall,
       ),
       const SizedBox(height: 8),
@@ -205,7 +234,12 @@ class _EnrutamientoPageState extends ConsumerState<EnrutamientoPage> {
           nivel: nivel,
           articulos: articulos[familia.codfamilia] ?? 0,
           regla: borrador.reglaDe(familia.codfamilia),
-          origen: borrador.origenDe(familia.codfamilia, madreDe: madreDe),
+          destinoErp: erp[familia.codfamilia],
+          resolucion: borrador.origenDe(
+            familia.codfamilia,
+            madreDe: madreDe,
+            erp: erp,
+          ),
           nombreFamilia: (codfamilia) => nombres[codfamilia] ?? codfamilia,
           onChanged: (regla) =>
               _cambiar(borrador.conRegla(familia.codfamilia, regla)),
@@ -408,8 +442,8 @@ class _PorDefecto extends StatelessWidget {
             Text('Destino por defecto', style: theme.textTheme.titleMedium),
             const SizedBox(height: 4),
             Text(
-              'Para los artículos sin familia y las familias que heredan sin '
-              'que ninguna familia madre tenga destino.',
+              'Para los artículos sin familia y las familias sin destino '
+              'propio ni heredado (ni regla del TPV ni destino en el ERP).',
               style: theme.textTheme.bodySmall,
             ),
             const SizedBox(height: 8),
@@ -464,7 +498,8 @@ class _SinFamilias extends StatelessWidget {
   }
 }
 
-/// Una familia del árbol con su selector Cocina / Barra / Heredar.
+/// Una familia del árbol con su selector Cocina / Barra / Heredar (o ERP,
+/// si la familia tiene destino propio en el ERP).
 class _FilaFamilia extends StatelessWidget {
   const _FilaFamilia({
     super.key,
@@ -472,7 +507,8 @@ class _FilaFamilia extends StatelessWidget {
     required this.nivel,
     required this.articulos,
     required this.regla,
-    required this.origen,
+    required this.destinoErp,
+    required this.resolucion,
     required this.nombreFamilia,
     required this.onChanged,
   });
@@ -480,34 +516,41 @@ class _FilaFamilia extends StatelessWidget {
   final FamiliaCatalogo familia;
   final int nivel;
   final int articulos;
+
+  /// Regla propia del TPV (`null` = sin regla).
   final DestinoPreparacion? regla;
-  final ({DestinoPreparacion destino, String? familia}) origen;
+
+  /// Destino propio de la familia en el ERP (`null` = no lo define).
+  final DestinoPreparacion? destinoErp;
+  final ResolucionDestino resolucion;
   final String Function(String codfamilia) nombreFamilia;
   final ValueChanged<DestinoPreparacion?> onChanged;
-
-  String get _efectivo {
-    final destino = nombreDestino(origen.destino);
-    if (regla != null) return 'Va a $destino';
-    final desde = origen.familia;
-    return desde == null
-        ? 'Va a $destino (por defecto)'
-        : 'Va a $destino (heredado de ${nombreFamilia(desde)})';
-  }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final erp = destinoErp;
     final selector = SegmentedButton<_Opcion>(
       key: Key('selector-${familia.codfamilia}'),
       showSelectedIcon: false,
-      segments: const [
-        ButtonSegment(value: _Opcion.cocina, label: Text('Cocina')),
-        ButtonSegment(value: _Opcion.barra, label: Text('Barra')),
-        ButtonSegment(value: _Opcion.heredar, label: Text('Heredar')),
+      segments: [
+        const ButtonSegment(value: _Opcion.cocina, label: Text('Cocina')),
+        const ButtonSegment(value: _Opcion.barra, label: Text('Barra')),
+        ButtonSegment(
+          value: _Opcion.heredar,
+          label: Text(erp == null ? 'Heredar' : 'ERP'),
+          tooltip: erp == null
+              ? 'Sin regla del TPV: hereda de la familia madre'
+              : 'Sin regla del TPV: usa el destino del ERP '
+                    '(${nombreDestino(erp)})',
+        ),
       ],
       selected: {_opcionDe(regla)},
       onSelectionChanged: (s) => onChanged(_reglaDe(s.first)),
     );
+    final colorDestino = resolucion.destino == DestinoPreparacion.barra
+        ? theme.colorScheme.tertiary
+        : theme.colorScheme.primary;
     final texto = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -517,16 +560,34 @@ class _FilaFamilia extends StatelessWidget {
           '${articulos == 1 ? 'artículo' : 'artículos'}',
           style: theme.textTheme.bodySmall,
         ),
-        Text(
-          _efectivo,
-          key: Key('efectivo-${familia.codfamilia}'),
-          style: theme.textTheme.bodyMedium?.copyWith(
-            color: origen.destino == DestinoPreparacion.barra
-                ? theme.colorScheme.tertiary
-                : theme.colorScheme.primary,
-            fontWeight: FontWeight.w600,
-          ),
+        Wrap(
+          spacing: 8,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            Text(
+              'Va a ${nombreDestino(resolucion.destino)}',
+              key: Key('efectivo-${familia.codfamilia}'),
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: colorDestino,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            Text(
+              textoOrigen(familia.codfamilia, resolucion, nombreFamilia),
+              key: Key('origen-${familia.codfamilia}'),
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
         ),
+        // La regla del TPV oculta el destino del ERP: se indica cuál era.
+        if (regla != null && erp != null)
+          Text(
+            'Sobrescribe el destino del ERP (${nombreDestino(erp)})',
+            key: Key('erp-sobrescrito-${familia.codfamilia}'),
+            style: theme.textTheme.bodySmall,
+          ),
       ],
     );
     return Padding(

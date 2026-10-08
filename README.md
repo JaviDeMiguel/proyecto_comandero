@@ -45,7 +45,7 @@ La aplicación pregunta el rol del dispositivo la primera vez (se puede cambiar 
 1. Ajustes → *ERP FacturaScripts*: URL base y clave de API → **Probar conexión**. Muestra el diagnóstico (serie, formas de pago, almacén, cliente) y carga las formas de pago y almacenes reales. Cada clave inválida cuenta para el baneo de IP de FacturaScripts (5 en 10 minutos): la app no reintenta sola.
 2. *Fiscal*: serie, cliente genérico (botón **Crear cliente genérico** si no existe), almacén, formas de pago de efectivo y tarjeta y modo del asiento Z.
 3. *MySQL* (opcional, para escandallos y stock): servidor, usuario, contraseña, base de datos y TLS → **Probar conexión** y **Crear/verificar tablas tpv_\***.
-4. *Impresoras*: IP de tickets, cocina y barra (puerto 9100) → **Ticket de prueba**. **Enrutamiento por familias** (también desde el salón): cada familia del catálogo va a cocina o a barra, las subfamilias heredan la regla de su familia madre y el resto va al destino por defecto. El host decide el destino de cada línea, venga del comandero o de la tablet; una comanda con platos y bebidas sale en un ticket por puesto, y las anulaciones se imprimen en el puesto de la línea.
+4. *Impresoras*: IP de tickets, cocina y barra (puerto 9100) → **Ticket de prueba**. **Enrutamiento por familias** (también desde el salón): cada familia del catálogo va a cocina o a barra, las subfamilias heredan el destino de su familia madre y el resto va al destino por defecto. El destino puede venir del ERP (destino cocina/barra de la familia, `familias.tpv_destino`, con el plugin de hostelería) o de una regla del TPV; en cada nivel de la jerarquía manda la regla del TPV y después el ERP, y la pantalla muestra el origen de cada destino (*ERP*, *Regla del TPV*, *Heredado de…*, *Por defecto*). El host decide el destino de cada línea, venga del comandero o de la tablet; una comanda con platos y bebidas sale en un ticket por puesto, y las anulaciones se imprimen en el puesto de la línea.
 5. *Mesas*, *Reposición* y *Caja* (fondo inicial). Con *Código de emparejamiento* solo se conectan los comanderos que lo conozcan.
 
 La sala funciona aunque el ERP, MySQL o la impresora no estén disponibles: facturas, descuentos de stock, pedidos y asientos esperan en la cola de sincronización (pantalla *Sincronización*) y se envían, en orden y sin duplicados, cuando vuelven.
@@ -65,18 +65,31 @@ La clave de API necesita acceso (GET/POST/PUT/DELETE) a `reciboclientes` y `pago
 - El cobro mixto admite dos partes (efectivo + tarjeta); no hay pagos con más formas de pago ni rectificativas automáticas de un cobro mixto.
 - La cola de envíos fiables del comandero vive en memoria: si se cierra la app con envíos pendientes, esas líneas se pierden (la app lo indica con el contador de pendientes).
 - No hay nombre de camarero por defecto en los ajustes del comandero.
-- Los comanderos reciben las reglas de enrutamiento del host en el siguiente estado de la sala (al reconectar o refrescar); no afecta a la impresión porque el host fija el destino de cada línea al aceptarla.
+- Los comanderos reciben el enrutamiento efectivo del host (reglas del TPV + destinos del ERP) en el siguiente estado de la sala (al reconectar o refrescar); no afecta a la impresión porque el host fija el destino de cada línea al aceptarla.
 - Una factura en error detiene las siguientes hasta reintentarla o descartarla en *Sincronización* (FacturaScripts exige orden cronológico en la serie).
 - Con MySQL 8 la conexión debe ir con TLS (limitación de `mysql_client` con `caching_sha2_password`).
 - La pantalla de escandallos abre su propia conexión MySQL mientras está abierta.
 
+## ERP de hostelería (plugin de FacturaScripts)
+
+El plugin **Hosteleria** (código en [`erp/Hosteleria`](erp/Hosteleria) de este repositorio; FacturaScripts 2026.5 o superior) convierte la instalación en el ERP del TPV:
+
+- **Escandallos** (`tpv_escandallos`) con merma y coste teórico desde la ficha del producto, y el **diario de stock del TPV** (`tpv_movimientos_stock`). Las tablas son las mismas que crea la app (mismo DDL), así que da igual quién las cree primero.
+- **Destino cocina/barra por familia**: columna `familias.tpv_destino` (`cocina`, `barra` o vacío = hereda de la familia madre), visible en la API (`GET /api/3/familias`). El TPV la lee con el catálogo; una regla del TPV la sobrescribe.
+- Consulta de los **tickets** y **cierres Z** que envía el TPV.
+- Un **asistente** (*Hostelería → Configurar TPV*) con 12 comprobaciones y un botón para corregir cada una: API activada, cuentas *Caja* (570) y *Banco TPV* (572), formas de pago `TPVEFE` (Efectivo TPV) y `TPVTAR` (Tarjeta TPV) que nacen pagadas, cliente genérico `TPV` ("CLIENTES VARIOS (TPV)"), serie `S` (simplificada), almacén, clave de API *TPV Comandero* con acceso solo a los 28 recursos que usa la app, tablas `tpv_*`, y platos/materias primas con el control de stock correcto. También genera, a petición, el usuario de MySQL del TPV con privilegios mínimos y TLS, y muestra el resumen de valores para los Ajustes de la app.
+- Una **carta de ejemplo** opcional (restaurante manchego): familias con destino, platos y bebidas con IVA 10 %, materias primas con stock mínimo, proveedores con precios y escandallos con merma.
+
+Instalación: copia `erp/Hosteleria` en la carpeta `Plugins/` de FacturaScripts, actívalo en *Panel de control → Plugins* y ejecuta el asistente. Sin el plugin la app funciona igual (sin destinos en el ERP; las formas de pago se eligen en Ajustes).
+
 ## Configuración recomendada en FacturaScripts
 
 1. Serie para facturas simplificadas (de fábrica `S`).
-2. Cliente genérico de contado (p. ej. `TPV`, "CLIENTES VARIOS (TPV)"), sin riesgo máximo. La app puede crearlo desde Ajustes.
-3. Formas de pago de efectivo y tarjeta con `pagado = sí` y asociadas a una cuenta bancaria cuya subcuenta sea `570…` (caja) y `572…` (banco). Sin esa cuenta, FacturaScripts contabiliza todos los cobros en 572.
+2. Cliente genérico de contado `TPV` ("CLIENTES VARIOS (TPV)"), sin riesgo máximo. Lo crea el asistente del plugin; la app también puede crearlo desde Ajustes.
+3. Formas de pago de efectivo y tarjeta con `pagado = sí` y asociadas a una cuenta bancaria cuya subcuenta sea `570…` (caja) y `572…` (banco). Sin esa cuenta, FacturaScripts contabiliza todos los cobros en 572. La app usa por defecto `TPVEFE` y `TPVTAR` (las del asistente); unos ajustes ya guardados conservan sus formas de pago.
 4. Productos de carta con **"no controlar stock"** (el stock lo llevan las materias primas, que descuenta el TPV según el escandallo).
 5. Ejercicio abierto con el plan contable cargado (subcuentas 570, 572, 700, 477, 659 y 759).
+6. Con el plugin, el destino cocina/barra de las familias raíz (p. ej. Bebidas → barra); las subfamilias lo heredan.
 
 ## Cierre Z y contabilidad
 

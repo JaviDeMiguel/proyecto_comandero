@@ -232,6 +232,12 @@ final class FakeSalaHost {
     );
   }
 
+  /// Sustituye el enrutamiento que publica y avisa con `enrutamiento.changed`.
+  int cambiarEnrutamiento(EnrutamientoComandas? nuevo) {
+    enrutamiento = nuevo;
+    return server.broadcast(SalaMessageTypes.enrutamientoChanged, const {});
+  }
+
   SalaSnapshot snapshot() => SalaSnapshot(
     mesas: mesas,
     comandas: comandas.values.toList(),

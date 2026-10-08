@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+ * Plugin Hosteleria: diario de movimientos de stock que aplica el TPV por SQL directo
+ * (garantía de idempotencia de cada descuento: UNIQUE operacion + referencia + almacén).
+ *
+ * Declaración equivalente al DDL canónico de la app (proyecto_comandero/sql/tpv_schema.sql),
+ * que crea Lib/TpvSchema.php. Este XML lo usa el DbUpdater de FacturaScripts para COMPARAR
+ * la tabla real y debe producir CERO cambios:
+ *  - id es BIGINT AUTO_INCREMENT en el DDL; "serial" aquí, porque el DbUpdater da por buena
+ *    cualquier columna real frente a "serial" y es el único tipo autoincremental del XML;
+ *  - sin FK a tablas de FS: es un diario y debe sobrevivir a borrados de referencias;
+ *  - el índice tpv_idx_movimientos_referencia lo pone el DDL (FS solo gestiona índices "fs_").
+-->
+<table>
+    <column>
+        <name>id</name>
+        <type>serial</type>
+        <null>NO</null>
+    </column>
+    <column>
+        <name>operacion</name>
+        <type>character varying(64)</type>
+        <null>NO</null>
+    </column>
+    <column>
+        <name>referencia</name>
+        <type>character varying(30)</type>
+        <null>NO</null>
+    </column>
+    <column>
+        <name>codalmacen</name>
+        <type>character varying(4)</type>
+        <null>NO</null>
+    </column>
+    <column>
+        <name>cantidad</name>
+        <type>double precision</type>
+        <null>NO</null>
+    </column>
+    <column>
+        <name>motivo</name>
+        <type>character varying(20)</type>
+        <null>NO</null>
+    </column>
+    <column>
+        <name>origen</name>
+        <type>character varying(100)</type>
+    </column>
+    <column>
+        <name>creado</name>
+        <type>datetime</type>
+        <null>NO</null>
+    </column>
+    <constraint>
+        <name>tpv_movimientos_stock_pkey</name>
+        <type>PRIMARY KEY (id)</type>
+    </constraint>
+    <constraint>
+        <name>tpv_uniq_movimientos_operacion</name>
+        <type>UNIQUE (operacion, referencia, codalmacen)</type>
+    </constraint>
+</table>

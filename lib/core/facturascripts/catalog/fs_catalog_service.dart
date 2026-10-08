@@ -163,6 +163,8 @@ final class FsCatalogService {
     codfamilia: r.fsRequireString('codfamilia'),
     descripcion: r.fsString('descripcion') ?? '',
     madre: r.fsNonEmptyString('madre'),
+    // Columna del plugin de hostelería; sin el plugin no viene y es `null`.
+    destino: FamiliaCatalogo.normalizarDestino(r['tpv_destino']),
   );
 
   static ImpuestoCatalogo _impuesto(FsRecord r) => ImpuestoCatalogo(

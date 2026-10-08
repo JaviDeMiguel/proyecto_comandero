@@ -299,6 +299,55 @@ void main() {
     expect(controller.destinoDe('BEB'), DestinoPreparacion.barra);
   });
 
+  test('los destinos del ERP del catálogo se aplican con el enrutamiento '
+      'local y no cambian el efectivo que publica el host', () async {
+    // ERP: platos a barra y bebidas a cocina.
+    final conErp = CatalogSnapshot(
+      familias: const [
+        FamiliaCatalogo(
+          codfamilia: 'BEB',
+          descripcion: 'Bebidas',
+          destino: 'cocina',
+        ),
+        FamiliaCatalogo(
+          codfamilia: 'PLA',
+          descripcion: 'Platos',
+          destino: 'barra',
+        ),
+      ],
+      impuestos: kCatalogoPrueba.impuestos,
+      articulos: kCatalogoPrueba.articulos,
+      avisos: const [],
+      obtenidoEn: kCatalogoPrueba.obtenidoEn,
+    );
+    host.catalogo = conErp;
+    final controller = newController();
+    controller.conectar(HostObjetivo(endpoint: host.endpoint));
+    final conectado = await waitConectado(controller);
+    expect(conectado.catalogo, conErp);
+    expect(conectado.sala.enrutamiento, isNull, reason: 'host antiguo');
+    // Local: bebidas a barra (regla del TPV, manda sobre el ERP).
+    expect(controller.destinoDe('BEB'), DestinoPreparacion.barra);
+    expect(controller.destinoDe('PLA'), DestinoPreparacion.barra);
+
+    // Host nuevo: publica su enrutamiento efectivo (reglas + ERP).
+    const reglasHost = EnrutamientoComandas(
+      porFamilia: {'PLA': DestinoPreparacion.cocina},
+    );
+    final efectivo = reglasHost.conDestinosErp(conErp.familias);
+    expect(efectivo.porFamilia, {
+      'BEB': DestinoPreparacion.cocina,
+      'PLA': DestinoPreparacion.cocina,
+    });
+    host.enrutamiento = efectivo;
+    final otro = newController();
+    otro.conectar(HostObjetivo(endpoint: host.endpoint));
+    await waitConectado(otro);
+    expect(otro.enrutamiento, efectivo);
+    expect(otro.destinoDe('BEB'), DestinoPreparacion.cocina);
+    expect(otro.destinoDe('PLA'), DestinoPreparacion.cocina);
+  });
+
   test(
     'enviar sin conexión queda pendiente y se entrega al reconectar',
     () async {
@@ -442,6 +491,144 @@ void main() {
     expect(conectado.catalogo!.articulos, hasLength(2));
     expect(cache.catalogo?.version, 'v2');
     expect(controller.catalogo, nuevo);
+  });
+
+  group('r1: enrutamiento del snapshot al día', () {
+    // CER (Cervezas) cuelga de BEB; la caña es de CER. El destino de CER
+    // viene del ERP (`familias.tpv_destino`); el TPV no tiene reglas.
+    CatalogSnapshot catalogoConCer(String destinoCer) => CatalogSnapshot(
+      familias: [
+        const FamiliaCatalogo(codfamilia: 'BEB', descripcion: 'Bebidas'),
+        FamiliaCatalogo(
+          codfamilia: 'CER',
+          descripcion: 'Cervezas',
+          madre: 'BEB',
+          destino: destinoCer,
+        ),
+        const FamiliaCatalogo(codfamilia: 'PLA', descripcion: 'Platos'),
+      ],
+      impuestos: kCatalogoPrueba.impuestos,
+      articulos: [
+        for (final a in kCatalogoPrueba.articulos)
+          a.referencia == 'CANA'
+              ? ArticuloCatalogo(
+                  referencia: a.referencia,
+                  idproducto: a.idproducto,
+                  idvariante: a.idvariante,
+                  descripcion: a.descripcion,
+                  codfamilia: 'CER',
+                  codimpuesto: a.codimpuesto,
+                  ivaBp: a.ivaBp,
+                  precioNeto: a.precioNeto,
+                  pvpCents: a.pvpCents,
+                  nostock: a.nostock,
+                )
+              : a,
+      ],
+      avisos: const [],
+      obtenidoEn: kCatalogoPrueba.obtenidoEn,
+    );
+
+    /// Lo que calcula el host real: reglas del TPV + ERP de SU catálogo.
+    DestinoPreparacion destinoHost(
+      EnrutamientoComandas reglas,
+      CatalogSnapshot catalogo,
+      String codfamilia,
+    ) => reglas.destinoDe(
+      codfamilia,
+      madreDe: EnrutamientoComandas.jerarquia(catalogo.familias),
+      erp: EnrutamientoComandas.destinosErp(catalogo.familias),
+    );
+
+    test('tras catalogo.changed con otro tpv_destino, el comandero pide el '
+        'snapshot y calcula el mismo destino que el host', () async {
+      const reglasTpv = EnrutamientoComandas();
+      final v1 = catalogoConCer('barra');
+      final v2 = catalogoConCer('cocina');
+      host.catalogo = v1;
+      host.enrutamiento = reglasTpv.conDestinosErp(v1.familias);
+      expect(host.enrutamiento!.porFamilia, {'CER': DestinoPreparacion.barra});
+
+      final controller = newController();
+      controller.conectar(HostObjetivo(endpoint: host.endpoint));
+      await waitConectado(controller);
+      expect(controller.destinoDe('CER'), DestinoPreparacion.barra);
+      host.requests.clear();
+
+      // El host refresca el catálogo (CER pasa a cocina) y publica el
+      // enrutamiento efectivo de la versión nueva.
+      host.enrutamiento = reglasTpv.conDestinosErp(v2.familias);
+      expect(host.cambiarCatalogo(v2, 'v2'), 1);
+      final conectado = await waitState<Conectado>(
+        controller.states,
+        controller.state,
+        (s) => s.catalogo == v2 && s.sala.catalogoVersion == 'v2',
+        what: 'catálogo v2 y snapshot de la v2',
+      );
+      expect(host.requests, [
+        SalaMessageTypes.catalogoGet,
+        SalaMessageTypes.salaSnapshotGet,
+      ]);
+      expect(conectado.sala.enrutamiento, host.enrutamiento);
+      expect(destinoHost(reglasTpv, v2, 'CER'), DestinoPreparacion.cocina);
+      expect(
+        controller.destinoDe('CER'),
+        destinoHost(reglasTpv, v2, 'CER'),
+        reason: 'la regla aplanada CER→barra de la v1 ya no tapa al ERP',
+      );
+
+      // Lo que el comandero envía (el host simulado no lo recalcula).
+      controller.anadirReferencia('m1', 'CANA');
+      final result = await controller.enviar('m1');
+      expect(result.comanda.lineas.single.destino, DestinoPreparacion.cocina);
+    });
+
+    test('recargar el catálogo de la misma versión que el snapshot no '
+        'vuelve a pedir la sala', () async {
+      final controller = newController(
+        reintentoCatalogo: const Duration(milliseconds: 20),
+      );
+      host.fallosCatalogo = 1; // el primer catalogo.get falla y se reintenta
+      controller.conectar(HostObjetivo(endpoint: host.endpoint));
+      await waitState<Conectado>(
+        controller.states,
+        controller.state,
+        (s) => s.catalogo != null && !s.catalogoDesactualizado,
+        what: 'catálogo cargado tras el reintento',
+      );
+      // Margen para que una petición de sala de más llegase al host.
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      expect(host.requests, [
+        SalaMessageTypes.salaSnapshotGet,
+        SalaMessageTypes.catalogoGet,
+        SalaMessageTypes.catalogoGet,
+      ], reason: 'el snapshot ya era de la versión cargada');
+    });
+
+    test('enrutamiento.changed vuelve a pedir el snapshot con las reglas '
+        'nuevas del TPV', () async {
+      final controller = newController();
+      controller.conectar(HostObjetivo(endpoint: host.endpoint));
+      await waitConectado(controller);
+      expect(controller.destinoDe('PLA'), DestinoPreparacion.cocina);
+
+      const nuevas = EnrutamientoComandas(
+        porFamilia: {'PLA': DestinoPreparacion.barra},
+      );
+      expect(host.cambiarEnrutamiento(nuevas), 1);
+      final conectado = await waitState<Conectado>(
+        controller.states,
+        controller.state,
+        (s) => s.sala.enrutamiento == nuevas,
+        what: 'snapshot con el enrutamiento nuevo',
+      );
+      expect(conectado.sala.enrutamiento, nuevas);
+      expect(controller.destinoDe('PLA'), DestinoPreparacion.barra);
+      expect(
+        host.requests.where((r) => r == SalaMessageTypes.salaSnapshotGet),
+        hasLength(2),
+      );
+    });
   });
 
   test(
