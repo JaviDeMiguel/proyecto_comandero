@@ -11,6 +11,7 @@ use FacturaScripts\Plugins\Hosteleria\Lib\TpvApiPermisos;
 use FacturaScripts\Plugins\Hosteleria\Lib\TpvAsistente;
 use FacturaScripts\Plugins\Hosteleria\Lib\TpvCartaEjemplo;
 use FacturaScripts\Plugins\Hosteleria\Lib\TpvMysqlUsuario;
+use FacturaScripts\Plugins\Hosteleria\Lib\TpvSchema;
 
 /**
  * Página "Configurar TPV": comprobaciones con botón de corrección, usuario de MySQL para el
@@ -36,6 +37,9 @@ class ConfigurarTpv extends Controller
     /** @var array resultado de ejecutar las sentencias de MySQL: [ok, mensaje] */
     public $mysqlResultado = [];
 
+    /** @var bool las sentencias de MySQL ya se han ejecutado con éxito en esta petición */
+    public $mysqlEjecutado = false;
+
     /** @var array formulario de MySQL: usuario, host, tls */
     public $mysqlForm = ['usuario' => 'tpv_comandero', 'host' => '192.168.1.%', 'tls' => true];
 
@@ -48,7 +52,6 @@ class ConfigurarTpv extends Controller
         $data['menu'] = 'hosteleria';
         $data['title'] = 'tpv-setup';
         $data['icon'] = 'fa-solid fa-wand-magic-sparkles';
-        $data['ordernum'] = 1;
         return $data;
     }
 
@@ -60,14 +63,16 @@ class ConfigurarTpv extends Controller
         $clave = $this->asistente->apiKey();
         $dbHost = (string)Tools::config('db_host', '');
         $local = self::esHostLocal($dbHost);
+        $ip = self::ipRedLocal();
 
         // la URL sale del ajuste site_url o de la petición del administrador: en WAMP suele ser
         // http://localhost/facturascripts, inservible desde la tableta
         $url = rtrim(Tools::siteUrl(), '/');
         $urlLocal = self::esHostLocal((string)parse_url($url, PHP_URL_HOST));
-        $urlSugerida = $urlLocal ? self::urlConIp($url, self::ipRedLocal()) : null;
+        $urlSugerida = $urlLocal ? self::urlConIp($url, $ip) : null;
 
         return [
+            'dbHostSugerido' => $local ? $ip : null,
             'url' => $url,
             'api' => $url . '/api/3',
             'urlLocal' => $urlLocal,
@@ -174,6 +179,11 @@ class ConfigurarTpv extends Controller
     public function privateCore(&$response, $user, $permissions)
     {
         parent::privateCore($response, $user, $permissions);
+
+        // la página muestra la clave de API y contraseñas de MySQL: que el navegador no la guarde
+        $this->response->header('Cache-Control', 'no-store, no-cache, must-revalidate');
+        $this->response->header('Pragma', 'no-cache');
+
         $this->asistente = new TpvAsistente();
         $this->esAdmin = (bool)$user->admin;
         if (false === $this->esAdmin) {
@@ -211,7 +221,8 @@ class ConfigurarTpv extends Controller
                 foreach ($errores as $error) {
                     Tools::log()->warning($error);
                 }
-                if (empty($errores)) {
+                // los GRANT sobre tpv_* no llevan CREATE: las tablas tienen que existir
+                if (empty($errores) && $this->tablasTpv()) {
                     $this->mysql = $mysql;
                 }
                 return;
@@ -228,14 +239,23 @@ class ConfigurarTpv extends Controller
                     $this->mysqlForm['tls'],
                     (string)$this->request->input('password', '')
                 );
-                foreach ($mysql->errores() as $error) {
+                $errores = $mysql->errores();
+                foreach ($errores as $error) {
                     Tools::log()->warning($error);
                 }
+                if (false === empty($errores) || false === $this->tablasTpv()) {
+                    return;
+                }
+
+                // la contraseña y las sentencias siguen a la vista después de ejecutar
+                $this->mysql = $mysql;
+
                 // restablecer la contraseña de una cuenta que ya existe exige marcar la casilla
                 // (que tiene su propia confirmación en la vista)
                 $restablecer = $this->request->input('reset_password', '') === '1';
                 $this->mysqlResultado = $mysql->ejecutar($restablecer);
                 if ($this->mysqlResultado[0]) {
+                    $this->mysqlEjecutado = true;
                     Tools::log()->notice('tpv-mysql-executed-ok');
                 } else {
                     Tools::log()->error('tpv-mysql-executed-failed');
@@ -244,15 +264,27 @@ class ConfigurarTpv extends Controller
 
             case 'load-menu':
                 $carta = new TpvCartaEjemplo();
-                $ok = $carta->cargar();
-                $this->resumenCarta = $carta->resumen;
-                if ($ok) {
+                if ($carta->cargar()) {
+                    $this->resumenCarta = $carta->resumen;
                     Tools::log()->notice('tpv-menu-loaded');
                 }
                 return;
         }
 
         Tools::log()->warning('tpv-unknown-action', ['%action%' => $action]);
+    }
+
+    /**
+     * Crea las tablas tpv_* si faltan. false (con aviso) si no se han podido crear.
+     */
+    private function tablasTpv(): bool
+    {
+        if (TpvSchema::ensureAll()) {
+            return true;
+        }
+
+        Tools::log()->error('tpv-mysql-tables-missing');
+        return false;
     }
 
     private function leerFormMysql(): void

@@ -11,27 +11,60 @@ use FacturaScripts\Core\Template\ModelTrait;
 use FacturaScripts\Core\Tools;
 use FacturaScripts\Core\Where;
 use FacturaScripts\Dinamic\Model\Variante;
+use FacturaScripts\Plugins\Hosteleria\Lib\TpvCosteEscandallo;
+use FacturaScripts\Plugins\Hosteleria\Lib\TpvGrafoRecetas;
 use FacturaScripts\Plugins\Hosteleria\Lib\TpvSchema;
 
 /**
  * Línea de receta (escandallo): cantidad NETA de un ingrediente que lleva un plato y su
  * porcentaje de merma. La cantidad BRUTA que sale del almacén es neta / (1 - merma / 100).
  *
- * Reglas (las mismas que EscandalloRepository de la app):
- *  - plato e ingrediente son referencias existentes de variantes (máx. 30 caracteres);
- *  - un plato no puede ser ingrediente de sí mismo (ni directa ni indirectamente: el plugin
- *    además impide recetas cíclicas, que el motor de escandallos de la app rechaza);
+ * Reglas (las mismas que EscandalloRepository y el motor de escandallos de la app):
+ *  - plato e ingrediente son referencias existentes de variantes (máx. 30 caracteres), que se
+ *    guardan tal como están en variantes (el motor de la app distingue mayúsculas);
+ *  - un plato no puede ser ingrediente de sí mismo, ni directa ni indirectamente (ciclo);
+ *  - una cadena de subrecetas no puede pasar de TpvGrafoRecetas::MAX_PROFUNDIDAD platos;
  *  - cantidad > 0 y merma en [0, 100);
  *  - un ingrediente aparece una sola vez en cada plato (UNIQUE plato + ingrediente).
+ * Un ciclo o una cadena demasiado larga harían que la app rechazase el grafo COMPLETO y dejase de
+ * descontar stock de todas las ventas.
+ *
+ * Atributos calculados (TpvCosteEscandallo::decorar, o al leerlos por primera vez, p. ej. al
+ * exportar):
+ *
+ * @property float|null  $cantidad_bruta          cantidad bruta por unidad de plato
+ * @property float|null  $coste_linea             cantidad bruta × coste unitario
+ * @property string|null $coste_origen            ficha, receta, receta-incompleta, receta-invalida o sin-coste
+ * @property float|null  $coste_unitario          coste del ingrediente (de su receta si la tiene)
+ * @property float|null  $descuento_tpv           lo que descuenta el TPV (null si el ingrediente tiene receta)
+ * @property string|null $ingrediente_descripcion
+ * @property int|null    $ingrediente_idproducto
+ * @property string|null $plato_descripcion
+ * @property int|null    $plato_idproducto
  */
 class TpvEscandallo extends ModelClass
 {
     use ModelTrait;
 
+    /** Atributos que calcula TpvCosteEscandallo::decorar(). */
+    const CALCULADOS = [
+        'cantidad_bruta', 'coste_linea', 'coste_origen', 'coste_unitario', 'descuento_tpv',
+        'ingrediente_descripcion', 'ingrediente_idproducto', 'plato_descripcion', 'plato_idproducto',
+    ];
+
+    /** Decimales con los que la app descuenta el stock (StockRepository.round3). */
+    const DECIMALES_STOCK = 3;
+
     const MAX_REFERENCIA = 30;
 
-    /** Límite de nodos al recorrer recetas anidadas (protección ante datos corruptos). */
-    const MAX_NODOS = 500;
+    /** Avisos de redondeo como máximo al guardar una línea. */
+    const MAX_AVISOS_REDONDEO = 10;
+
+    /** Diferencia relativa a partir de la cual se avisa del redondeo del descuento del TPV. */
+    const TOLERANCIA_REDONDEO = 0.05;
+
+    /** @var TpvCosteEscandallo|null calculadora compartida para los atributos perezosos */
+    private static $costes = null;
 
     /** @var string fecha y hora de modificación */
     public $actualizado;
@@ -67,6 +100,24 @@ class TpvEscandallo extends ModelClass
         parent::__construct($data);
     }
 
+    public function __get(string $key)
+    {
+        if (in_array($key, self::CALCULADOS, true) && false === array_key_exists($key, $this->attributes)) {
+            $this->calcular();
+        }
+
+        return parent::__get($key);
+    }
+
+    public function __isset(string $key): bool
+    {
+        if (in_array($key, self::CALCULADOS, true) && false === array_key_exists($key, $this->attributes)) {
+            $this->calcular();
+        }
+
+        return parent::__isset($key);
+    }
+
     /**
      * Cantidad bruta (con merma) que se descuenta del almacén por unidad de plato.
      */
@@ -77,17 +128,20 @@ class TpvEscandallo extends ModelClass
 
     public static function bruta(float $neta, float $merma): float
     {
-        if ($merma < 0 || $merma >= 100) {
-            return $neta;
-        }
-
-        return $neta / (1 - $merma / 100);
+        return TpvGrafoRecetas::bruta($neta, $merma);
     }
 
     public function clear(): void
     {
+        $this->olvidarCalculados();
         parent::clear();
         $this->merma = 0.0;
+    }
+
+    public function loadFromData(array $data = [], array $exclude = [], bool $sync = true): void
+    {
+        $this->olvidarCalculados();
+        parent::loadFromData($data, $exclude, $sync);
     }
 
     /**
@@ -96,31 +150,17 @@ class TpvEscandallo extends ModelClass
      */
     public static function createsCycle(string $refPlato, string $refIngrediente): bool
     {
-        $target = mb_strtolower($refPlato);
-        $pending = [$refIngrediente];
-        $visited = [];
+        return null !== TpvGrafoRecetas::cargar()->camino($refIngrediente, $refPlato);
+    }
 
-        while (!empty($pending) && count($visited) < static::MAX_NODOS) {
-            $current = array_shift($pending);
-            $key = mb_strtolower($current);
-            if ($key === $target) {
-                return true;
-            }
-            if (isset($visited[$key])) {
-                continue;
-            }
-            $visited[$key] = true;
-
-            $rows = static::table()
-                ->select('ref_ingrediente')
-                ->whereEq('ref_plato', $current)
-                ->get();
-            foreach ($rows as $row) {
-                $pending[] = (string)$row['ref_ingrediente'];
-            }
+    public function delete(): bool
+    {
+        if (false === parent::delete()) {
+            return false;
         }
 
-        return false;
+        self::$costes = null;
+        return true;
     }
 
     public function getIngrediente(): ?Variante
@@ -138,9 +178,28 @@ class TpvEscandallo extends ModelClass
         return 'id';
     }
 
+    /**
+     * «PLATO › INGREDIENTE» (título de la ficha de la línea).
+     */
+    public function primaryDescription()
+    {
+        return $this->ref_plato . ' › ' . $this->ref_ingrediente;
+    }
+
     public function primaryDescriptionColumn(): string
     {
         return 'ref_ingrediente';
+    }
+
+    public function save(): bool
+    {
+        if (false === parent::save()) {
+            return false;
+        }
+
+        // los costes y grafos ya calculados en esta petición dejan de valer
+        self::$costes = null;
+        return true;
     }
 
     public static function tableName(): string
@@ -204,14 +263,13 @@ class TpvEscandallo extends ModelClass
             return false;
         }
 
-        // sin recetas cíclicas
-        if (static::createsCycle($this->ref_plato, $this->ref_ingrediente)) {
-            Tools::log()->warning('tpv-recipe-cycle', [
-                '%ingredient%' => $this->ref_ingrediente,
-                '%dish%' => $this->ref_plato,
-            ]);
+        // grafo de recetas válido para el motor de la app: sin ciclos ni cadenas demasiado largas
+        $grafo = $this->testGrafo();
+        if (null === $grafo) {
             return false;
         }
+
+        $this->avisarRedondeoTpv($grafo);
 
         // las fechas las gestiona el modelo (los formularios no pueden cambiarlas): FS reescribe la
         // fila completa y MySQL no aplica ON UPDATE CURRENT_TIMESTAMP si se asigna el valor actual
@@ -226,7 +284,102 @@ class TpvEscandallo extends ModelClass
         return parent::test();
     }
 
-    private static function emptyToNull($value): ?string
+    /**
+     * Avisa (sin impedir el guardado) si, al vender una unidad de un plato, el TPV va a descontar
+     * de alguna materia prima una cantidad muy distinta de la exacta. La app expande el plato hasta
+     * sus hojas, suma por hoja y redondea a 3 decimales (0,0044 kg de ajo se quedan en 0,004, -10 %;
+     * menos de 0,0005 no se descuenta). Se revisan las hojas a las que llega esta línea, en este
+     * plato y en los que lo usan como semielaborado.
+     */
+    private function avisarRedondeoTpv(TpvGrafoRecetas $grafo): void
+    {
+        $hojasLinea = array_keys($grafo->hojasPorUnidad($this->ref_ingrediente) ?? []);
+
+        // el plato y todos los que lo usan, directa o indirectamente
+        $platos = [$this->ref_plato => true];
+        $pendientes = [$this->ref_plato];
+        while (!empty($pendientes)) {
+            foreach ($grafo->usosDe(array_shift($pendientes)) as $usuario) {
+                if (false === isset($platos[$usuario])) {
+                    $platos[$usuario] = true;
+                    $pendientes[] = $usuario;
+                }
+            }
+        }
+
+        $avisos = 0;
+        foreach (array_keys($platos) as $plato) {
+            $hojas = $grafo->hojasPorUnidad((string)$plato) ?? [];
+            foreach ($hojasLinea as $hoja) {
+                $exacta = $hojas[$hoja] ?? 0.0;
+                if ($exacta <= 0 || $avisos >= self::MAX_AVISOS_REDONDEO) {
+                    continue;
+                }
+
+                $tpv = round($exacta, self::DECIMALES_STOCK);
+                $diferencia = abs($tpv - $exacta) / $exacta;
+                if ($tpv > 0 && $diferencia <= self::TOLERANCIA_REDONDEO) {
+                    continue;
+                }
+
+                $params = [
+                    '%ingredient%' => $hoja,
+                    '%dish%' => $plato,
+                    '%gross%' => Tools::number($exacta, self::decimalesSignificativos($exacta)),
+                    '%tpv%' => Tools::number($tpv, self::DECIMALES_STOCK),
+                    '%pct%' => Tools::number(100 * $diferencia, 1),
+                ];
+                Tools::log()->warning($tpv > 0 ? 'tpv-recipe-stock-rounding' : 'tpv-recipe-below-stock-precision', $params);
+                $avisos++;
+            }
+        }
+    }
+
+    /**
+     * Decimales para mostrar una cantidad pequeña sin ceros de relleno (entre 3 y 6).
+     */
+    private static function decimalesSignificativos(float $valor): int
+    {
+        $decimales = 6;
+        while ($decimales > self::DECIMALES_STOCK && round($valor, $decimales - 1) == round($valor, $decimales)) {
+            $decimales--;
+        }
+
+        return $decimales;
+    }
+
+    /**
+     * Olvida los atributos calculados (al limpiar o cargar otro registro en la misma instancia).
+     */
+    private function olvidarCalculados(): void
+    {
+        foreach (self::CALCULADOS as $key) {
+            unset($this->attributes[$key]);
+        }
+    }
+
+    /**
+     * Calcula los atributos de coste y descripciones de esta línea (atributos perezosos: la
+     * exportación a PDF/Excel vuelve a leer las líneas sin pasar por el controlador).
+     */
+    private function calcular(): void
+    {
+        foreach (self::CALCULADOS as $key) {
+            // evita la recursión si decorar() lee algún atributo aún no asignado
+            $this->attributes[$key] = null;
+        }
+
+        if (null === $this->id) {
+            return;
+        }
+
+        if (null === self::$costes) {
+            self::$costes = new TpvCosteEscandallo();
+        }
+        self::$costes->decorar([$this]);
+    }
+
+    private static function emptyToNull(mixed $value): ?string
     {
         if (null === $value) {
             return null;
@@ -244,6 +397,45 @@ class TpvEscandallo extends ModelClass
 
         $variante = new Variante();
         return $variante->loadWhereEq('referencia', $referencia) ? $variante : null;
+    }
+
+    /**
+     * La línea no puede crear un ciclo ni una cadena de más de TpvGrafoRecetas::MAX_PROFUNDIDAD
+     * platos con receta. Solo se comprueban las cadenas que pasan por esta línea: una receta ya
+     * corrupta (p. ej. guardada desde la app) no impide corregir las demás; la señala el asistente.
+     *
+     * @return TpvGrafoRecetas|null el grafo con la línea ya puesta, o null si no es válida
+     */
+    private function testGrafo(): ?TpvGrafoRecetas
+    {
+        $grafo = TpvGrafoRecetas::cargar();
+        if ($this->id) {
+            $grafo->quitar((string)$this->getOriginal('ref_plato'), (string)$this->getOriginal('ref_ingrediente'));
+        }
+
+        $ciclo = $grafo->camino($this->ref_ingrediente, $this->ref_plato);
+        if (null !== $ciclo) {
+            Tools::log()->warning('tpv-recipe-cycle', [
+                '%ingredient%' => $this->ref_ingrediente,
+                '%dish%' => $this->ref_plato,
+                '%path%' => implode(' → ', array_merge([$this->ref_plato], $ciclo)),
+            ]);
+            return null;
+        }
+
+        $grafo->poner($this->ref_plato, $this->ref_ingrediente, (float)$this->cantidad, (float)$this->merma);
+        $niveles = $grafo->alturaArriba($this->ref_plato) + $grafo->altura($this->ref_ingrediente);
+        if ($niveles > TpvGrafoRecetas::MAX_PROFUNDIDAD) {
+            Tools::log()->warning('tpv-recipe-too-deep', [
+                '%ingredient%' => $this->ref_ingrediente,
+                '%dish%' => $this->ref_plato,
+                '%levels%' => $niveles,
+                '%max%' => TpvGrafoRecetas::MAX_PROFUNDIDAD,
+            ]);
+            return null;
+        }
+
+        return $grafo;
     }
 
     private function testReferencia(string $field, string $label): bool
@@ -270,7 +462,7 @@ class TpvEscandallo extends ModelClass
         return true;
     }
 
-    private static function toFloat($value): ?float
+    private static function toFloat(mixed $value): ?float
     {
         if (is_string($value)) {
             $value = str_replace(',', '.', trim($value));

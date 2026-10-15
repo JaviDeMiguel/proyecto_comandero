@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+ * Plugin Hosteleria: ventas del TPV por día y forma de pago (Model/Join/TpvVentaDiaria), sumadas
+ * de los recibos de los tickets: un cobro mixto suma su parte en efectivo y su parte con tarjeta.
+-->
+<view>
+    <columns>
+        <column name="date" order="100">
+            <widget type="date" fieldname="fecha"/>
+        </column>
+        <column name="payment-method" order="110">
+            <widget type="select" fieldname="codpago">
+                <values source="formaspago" fieldcode="codpago" fieldtitle="descripcion"/>
+            </widget>
+        </column>
+        <column name="tpv-tickets-count" display="right" order="120">
+            <widget type="number" fieldname="tickets" decimal="0"/>
+        </column>
+        <column name="amount" display="right" order="130">
+            <widget type="money" fieldname="importe"/>
+        </column>
+        <column name="tpv-pending" display="right" order="140">
+            <widget type="money" fieldname="pendiente"/>
+        </column>
+    </columns>
+    <rows>
+        <row type="status">
+            <option color="warning" title="tpv-pending" fieldname="pendiente">gt:0</option>
+        </row>
+    </rows>
+</view>

@@ -8,13 +8,21 @@ namespace FacturaScripts\Plugins\Hosteleria\Lib;
 /**
  * Recursos de la API REST v3 que usa la app del TPV y los métodos que necesita en cada uno.
  *
- * Fuente: proyecto_comandero/lib/core/facturascripts (fs_resources.dart: requeridosPorElTpv,
- * y los servicios de documents/, accounting/, catalog/ y master_data/). La clave del TPV se
- * crea SIN acceso total y solo con estos permisos.
+ * Fuente: proyecto_comandero/lib/core/facturascripts (los servicios de documents/, accounting/,
+ * catalog/ y master_data/). La clave del TPV se crea SIN acceso total y solo con estos permisos:
+ * una petición a cualquier otro recurso da 403 y cuenta como incidencia (cinco en diez minutos
+ * bloquean la IP), así que cada recurso que use la app tiene que estar aquí, y ninguno más.
  *
- * Perfil "pruebas": las suites de integración de la app (test/integration) borran lo que crean
- * (facturas, pedidos, partidas) y crean formas de pago temporales. Esos permisos no los usa la
- * app en producción, así que solo se conceden a petición y la comprobación lo marca como aviso.
+ * fs_resources.dart (requeridosPorElTpv) lista además lineafacturaclientes, cuentas, stocks,
+ * proveedores y productoproveedores, pero la app no los consulta por la API en producción (el
+ * stock, los proveedores y sus precios los lee por MySQL): no se conceden, para que un token
+ * filtrado no permita leer proveedores, precios de compra ni stock.
+ *
+ * Perfil "pruebas": las suites de integración de la app (test/integration) leen líneas de factura
+ * y stock, borran lo que crean (facturas, pedidos, partidas) y crean formas de pago temporales.
+ * Esos permisos no los usa la app en producción, así que solo se conceden a petición y la
+ * comprobación lo marca como aviso. Las pruebas de integración nunca deben apuntar a la
+ * instalación real.
  */
 final class TpvApiPermisos
 {
@@ -27,7 +35,6 @@ final class TpvApiPermisos
     const PRODUCCION = [
         // documentos de venta y compra
         'facturaclientes' => [true, false, true, false],          // releer factura; PUT de estado/pagada
-        'lineafacturaclientes' => [true, false, false, false],
         'pedidoproveedores' => [true, false, false, false],        // idempotencia por numproveedor
         'lineapedidoproveedores' => [true, false, false, false],
         'reciboclientes' => [true, true, true, true],              // cobro mixto: crea, ajusta y borra recibos
@@ -36,12 +43,10 @@ final class TpvApiPermisos
         'asientos' => [true, true, false, true],                   // crea y compensa (borra) si falla una partida
         'partidas' => [true, true, false, false],
         'subcuentas' => [true, false, false, false],
-        'cuentas' => [true, false, false, false],
         'ejercicios' => [true, false, false, false],
-        // catálogo y stock (la escritura de stock va por MySQL directo)
+        // catálogo (el stock se lee y se escribe por MySQL directo)
         'productos' => [true, false, false, false],
         'variantes' => [true, false, false, false],
-        'stocks' => [true, false, false, false],
         'familias' => [true, false, false, false],
         'impuestos' => [true, false, false, false],
         // datos maestros
@@ -49,8 +54,6 @@ final class TpvApiPermisos
         'formapagos' => [true, false, false, false],
         'almacenes' => [true, false, false, false],
         'clientes' => [true, true, false, false],                  // crea el cliente genérico si falta
-        'proveedores' => [true, false, false, false],
-        'productoproveedores' => [true, false, false, false],
         'empresas' => [true, false, false, false],
         'settings' => [true, false, false, false],
         'estadodocumentos' => [true, false, false, false],
@@ -65,9 +68,11 @@ final class TpvApiPermisos
      */
     const EXTRA_PRUEBAS = [
         'facturaclientes' => [false, false, false, true],
+        'lineafacturaclientes' => [true, false, false, false],
         'pedidoproveedores' => [false, false, false, true],
         'partidas' => [false, false, false, true],
         'formapagos' => [false, true, false, true],
+        'stocks' => [true, false, false, false],
     ];
 
     const PERFIL_PRODUCCION = 'produccion';

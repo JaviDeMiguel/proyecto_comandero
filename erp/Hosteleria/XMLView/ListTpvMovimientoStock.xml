@@ -1,7 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
  * Plugin Hosteleria: diario de movimientos de stock del TPV (solo lectura).
- * Cantidad positiva = consumo (resta stock); negativa = devolución (anulación).
+ * cantidad = variación aplicada a stocks.cantidad: negativa = consumo (comanda),
+ * positiva = devolución (anulación). La descripción la calcula el modelo; si la referencia
+ * ya no existe en variantes (el diario no tiene FK) se queda sin descripción ni enlace.
+ * Sin totales: la columna mezcla unidades de referencias distintas (kg, l, uds.).
 -->
 <view>
     <columns>
@@ -11,31 +14,38 @@
         <column name="date" order="100">
             <widget type="datetime" fieldname="creado"/>
         </column>
-        <column name="operation" order="110">
-            <widget type="text" fieldname="operacion"/>
+        <column name="origin" order="110">
+            <widget type="text" fieldname="origen"/>
         </column>
         <column name="reference" order="120">
-            <widget type="variante" fieldname="referencia" match="referencia" onclick="EditProducto"/>
+            <widget type="text" fieldname="referencia"/>
         </column>
-        <column name="warehouse" order="130">
+        <column name="description" order="130">
+            <widget type="text" fieldname="descripcion" onclick="EditProducto" fieldclick="idproducto"/>
+        </column>
+        <column name="warehouse" order="140">
             <widget type="select" fieldname="codalmacen">
                 <values source="almacenes" fieldcode="codalmacen" fieldtitle="nombre"/>
             </widget>
         </column>
-        <column name="quantity" display="right" order="140">
+        <column name="tpv-stock-change" display="right" order="150">
             <widget type="number" fieldname="cantidad" decimal="3">
-                <option color="success">lt:0</option>
+                <option color="success">gt:0</option>
             </widget>
         </column>
-        <column name="reason" order="150">
-            <widget type="text" fieldname="motivo"/>
+        <column name="reason" order="160">
+            <widget type="select" fieldname="motivo" translate="true">
+                <values title="tpv-reason-comanda">comanda</values>
+                <values title="tpv-reason-anulacion">anulacion</values>
+            </widget>
         </column>
-        <column name="origin" order="160">
-            <widget type="text" fieldname="origen"/>
+        <column name="operation" display="none" order="170">
+            <widget type="text" fieldname="operacion"/>
         </column>
     </columns>
     <rows>
         <row type="status">
+            <option color="warning" title="tpv-reference-deleted" fieldname="idproducto">null:</option>
             <option color="success" title="tpv-stock-return" fieldname="motivo">anulacion</option>
         </row>
     </rows>

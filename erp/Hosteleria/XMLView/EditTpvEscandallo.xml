@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
  * Plugin Hosteleria: ficha de una línea de escandallo (desde el listado general).
+ * Los autocompletados usan el modelo Variante (buscan por referencia, código de barras y
+ * descripción) y guardan la referencia.
 -->
 <view>
     <columns>
@@ -10,22 +12,31 @@
             </column>
             <column name="dish" title="tpv-dish" description="tpv-dish-desc" numcolumns="3" order="100">
                 <widget type="autocomplete" fieldname="ref_plato" required="true">
-                    <values source="variantes" fieldcode="referencia" fieldtitle="referencia"/>
+                    <values source="Variante" fieldcode="referencia" fieldtitle="referencia"/>
                 </widget>
+            </column>
+            <column name="dish-description" title="tpv-dish-description" numcolumns="3" order="105">
+                <widget type="text" fieldname="plato_descripcion" readonly="true"/>
             </column>
             <column name="ingredient" title="tpv-ingredient" description="tpv-ingredient-desc" numcolumns="3" order="110">
                 <widget type="autocomplete" fieldname="ref_ingrediente" required="true">
-                    <values source="variantes" fieldcode="referencia" fieldtitle="referencia"/>
+                    <values source="Variante" fieldcode="referencia" fieldtitle="referencia"/>
                 </widget>
             </column>
-            <column name="net-quantity" title="tpv-net-quantity" numcolumns="2" order="120">
-                <widget type="number" fieldname="cantidad" decimal="3" min="0" required="true"/>
+            <column name="ingredient-description" title="tpv-ingredient-description" numcolumns="3" order="115">
+                <widget type="text" fieldname="ingrediente_descripcion" readonly="true"/>
             </column>
-            <column name="waste" title="tpv-waste-pct" description="tpv-waste-desc" numcolumns="2" order="130">
+            <column name="net-quantity" title="tpv-net-quantity" description="tpv-net-quantity-desc" numcolumns="3" order="120">
+                <widget type="number" fieldname="cantidad" decimal="4" required="true"/>
+            </column>
+            <column name="waste" title="tpv-waste-pct" description="tpv-waste-desc" numcolumns="3" order="130">
                 <widget type="number" fieldname="merma" decimal="2" min="0" max="99.99" icon="fa-solid fa-percent"/>
             </column>
-            <column name="gross-quantity" title="tpv-gross-quantity" numcolumns="2" order="140">
-                <widget type="number" fieldname="cantidad_bruta" decimal="3" readonly="true"/>
+            <column name="gross-quantity" title="tpv-gross-quantity" numcolumns="3" order="140">
+                <widget type="number" fieldname="cantidad_bruta" decimal="4" readonly="true"/>
+            </column>
+            <column name="tpv-deduction" title="tpv-deduction" description="tpv-deduction-desc" numcolumns="3" order="145">
+                <widget type="number" fieldname="descuento_tpv" decimal="3" readonly="true"/>
             </column>
             <column name="observations" numcolumns="12" order="150">
                 <widget type="text" fieldname="observaciones" maxlength="255"/>
@@ -33,10 +44,10 @@
         </group>
         <group name="tpv-cost" title="tpv-theoretical-cost" numcolumns="12">
             <column name="unit-cost" title="tpv-unit-cost" numcolumns="3" order="100">
-                <widget type="money" fieldname="coste_unitario" readonly="true"/>
+                <widget type="money" fieldname="coste_unitario" decimal="4" readonly="true"/>
             </column>
             <column name="line-cost" title="tpv-line-cost" numcolumns="3" order="110">
-                <widget type="money" fieldname="coste_linea" readonly="true"/>
+                <widget type="money" fieldname="coste_linea" decimal="4" readonly="true"/>
             </column>
             <column name="created" title="created" numcolumns="3" order="120">
                 <widget type="datetime" fieldname="creado" readonly="true"/>

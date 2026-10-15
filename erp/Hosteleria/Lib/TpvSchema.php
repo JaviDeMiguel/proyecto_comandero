@@ -26,6 +26,9 @@ use FacturaScripts\Dinamic\Model\Variante;
  *
  * Los modelos TpvEscandallo y TpvMovimientoStock llaman a ensureTable() antes de que el
  * DbUpdater revise su tabla, de modo que el XML solo se usa para comparar.
+ *
+ * Los nombres de índice y restricción llevan el prefijo tpv_ y NUNCA deben contener la subcadena
+ * «fs_»: el DbUpdater borra cualquier índice cuyo nombre la contenga y no esté en el XML.
  */
 final class TpvSchema
 {
@@ -36,16 +39,30 @@ final class TpvSchema
     const TABLE_MOVIMIENTOS = 'tpv_movimientos_stock';
     const TABLES = [self::TABLE_ESCANDALLOS, self::TABLE_MOVIMIENTOS];
 
+    /** Índices únicos de los que depende la idempotencia de la app: tabla => índice. */
+    const UNIQUE_KEYS = [
+        self::TABLE_ESCANDALLOS => 'tpv_uniq_escandallos_plato_ingrediente',
+        self::TABLE_MOVIMIENTOS => 'tpv_uniq_movimientos_operacion',
+    ];
+
     /**
      * Sentencia CREATE TABLE IF NOT EXISTS de la tabla indicada, idéntica a la de la app.
+     * Sin claves ajenas ($conFk = false) solo si variantes.referencia no es UNIQUE (FS con
+     * FS_DB_FOREIGN_KEYS = false): MySQL no podría crearlas.
      */
-    public static function createSql(string $table, string $charset = self::DEFAULT_CHARSET, string $collation = self::DEFAULT_COLLATION): string
+    public static function createSql(string $table, string $charset = self::DEFAULT_CHARSET, string $collation = self::DEFAULT_COLLATION, bool $conFk = true): string
     {
         $refType = 'VARCHAR(30) CHARACTER SET ' . $charset . ' COLLATE ' . $collation;
         $options = 'ENGINE=InnoDB DEFAULT CHARSET=' . $charset . ' COLLATE=' . $collation;
 
         switch ($table) {
             case self::TABLE_ESCANDALLOS:
+                $fks = $conFk ?
+                    ",\n  CONSTRAINT tpv_fk_escandallos_plato FOREIGN KEY (ref_plato)\n"
+                    . "    REFERENCES variantes (referencia) ON DELETE CASCADE ON UPDATE CASCADE,\n"
+                    . "  CONSTRAINT tpv_fk_escandallos_ingrediente FOREIGN KEY (ref_ingrediente)\n"
+                    . "    REFERENCES variantes (referencia) ON DELETE RESTRICT ON UPDATE CASCADE" :
+                    '';
                 return "CREATE TABLE IF NOT EXISTS tpv_escandallos (\n"
                     . "  id INT NOT NULL AUTO_INCREMENT,\n"
                     . "  ref_plato " . $refType . " NOT NULL,\n"
@@ -59,11 +76,8 @@ final class TpvSchema
                     . "  UNIQUE KEY tpv_uniq_escandallos_plato_ingrediente (ref_plato, ref_ingrediente),\n"
                     . "  KEY tpv_idx_escandallos_ingrediente (ref_ingrediente),\n"
                     . "  CONSTRAINT tpv_chk_escandallos_cantidad CHECK (cantidad > 0),\n"
-                    . "  CONSTRAINT tpv_chk_escandallos_merma CHECK (merma >= 0 AND merma < 100),\n"
-                    . "  CONSTRAINT tpv_fk_escandallos_plato FOREIGN KEY (ref_plato)\n"
-                    . "    REFERENCES variantes (referencia) ON DELETE CASCADE ON UPDATE CASCADE,\n"
-                    . "  CONSTRAINT tpv_fk_escandallos_ingrediente FOREIGN KEY (ref_ingrediente)\n"
-                    . "    REFERENCES variantes (referencia) ON DELETE RESTRICT ON UPDATE CASCADE\n"
+                    . "  CONSTRAINT tpv_chk_escandallos_merma CHECK (merma >= 0 AND merma < 100)"
+                    . $fks . "\n"
                     . ") " . $options . ";";
 
             case self::TABLE_MOVIMIENTOS:
@@ -129,18 +143,73 @@ final class TpvSchema
         }
         [$charset, $collation] = self::referenciaCharset($db);
 
+        // sin índice único en variantes.referencia (FS_DB_FOREIGN_KEYS = false) la clave ajena no se
+        // puede crear: se crea igualmente con el DDL canónico SIN claves ajenas (conserva el UNIQUE,
+        // los CHECK y las fechas), nunca se deja al DbUpdater crearla desde el XML sin el UNIQUE
+        // del que depende el upsert de la app
+        $conFk = true;
         if ($table === self::TABLE_ESCANDALLOS && false === self::referenciaIsUnique($db)) {
-            Tools::log()->error('tpv-referencia-not-unique');
-            return false;
+            Tools::log()->warning('tpv-referencia-not-unique');
+            $conFk = false;
         }
 
-        if (false === $db->exec(self::createSql($table, $charset, $collation))) {
+        if (false === $db->exec(self::createSql($table, $charset, $collation, $conFk))) {
             Tools::log()->error('tpv-table-create-error', ['%table%' => $table]);
             return false;
         }
 
         Tools::log()->notice('tpv-table-created', ['%table%' => $table]);
         return true;
+    }
+
+    /**
+     * Índices únicos (UNIQUE_KEYS) que no existen en tablas tpv_* que sí existen.
+     *
+     * @return string[] tabla.índice
+     */
+    public static function indicesUnicosQueFaltan(): array
+    {
+        $db = new DataBase();
+        $faltan = [];
+        foreach (self::UNIQUE_KEYS as $tabla => $indice) {
+            if (false === $db->tableExists($tabla)) {
+                continue;
+            }
+
+            $sql = 'SELECT COUNT(*) AS n FROM information_schema.STATISTICS'
+                . ' WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ' . $db->var2str($tabla)
+                . ' AND INDEX_NAME = ' . $db->var2str($indice) . ' AND NON_UNIQUE = 0;';
+            $existe = false;
+            foreach ($db->select($sql) as $row) {
+                $existe = (int)$row['n'] > 0;
+            }
+            if (false === $existe) {
+                $faltan[] = $tabla . '.' . $indice;
+            }
+        }
+
+        return $faltan;
+    }
+
+    /**
+     * Líneas de receta cuyo plato o ingrediente ya no existe en variantes (solo posible sin
+     * claves ajenas). El motor de la app no puede descontar sus ingredientes.
+     */
+    public static function lineasHuerfanas(): int
+    {
+        $db = new DataBase();
+        if (false === $db->tableExists(self::TABLE_ESCANDALLOS)) {
+            return 0;
+        }
+
+        $sql = 'SELECT COUNT(*) AS n FROM ' . self::TABLE_ESCANDALLOS . ' e'
+            . ' WHERE NOT EXISTS (SELECT 1 FROM variantes v WHERE v.referencia = e.ref_plato)'
+            . ' OR NOT EXISTS (SELECT 1 FROM variantes v WHERE v.referencia = e.ref_ingrediente);';
+        foreach ($db->select($sql) as $row) {
+            return (int)$row['n'];
+        }
+
+        return 0;
     }
 
     /**

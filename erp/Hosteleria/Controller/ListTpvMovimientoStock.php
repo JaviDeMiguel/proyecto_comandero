@@ -6,15 +6,19 @@
 namespace FacturaScripts\Plugins\Hosteleria\Controller;
 
 use FacturaScripts\Core\Lib\ExtendedController\ListController;
+use FacturaScripts\Core\Tools;
 use FacturaScripts\Dinamic\Model\TpvMovimientoStock;
 
 /**
- * Diario de movimientos de stock del TPV (solo lectura).
+ * Diario de movimientos de stock del TPV (solo lectura) y consumo por materia prima.
+ *
+ * cantidad es la variación que el TPV ha sumado a stocks.cantidad: negativa = consumo de una
+ * comanda, positiva = devolución de una anulación.
  */
 class ListTpvMovimientoStock extends ListController
 {
-    /** Motivos que escribe la app; se completan con los que haya en la tabla. */
-    const MOTIVOS = ['comanda', 'anulacion'];
+    const VIEW_CONSUMO = 'ListTpvConsumo';
+    const VIEW_MOVIMIENTOS = 'ListTpvMovimientoStock';
 
     public function getPageData(): array
     {
@@ -28,26 +32,64 @@ class ListTpvMovimientoStock extends ListController
     protected function createViews()
     {
         $this->createViewsMovimientos();
+        $this->createViewsConsumo();
     }
 
-    protected function createViewsMovimientos(string $viewName = 'ListTpvMovimientoStock'): void
+    /**
+     * Consumo agregado por referencia y almacén (Join\TpvConsumo), filtrable por periodo.
+     */
+    protected function createViewsConsumo(string $viewName = self::VIEW_CONSUMO): void
     {
-        $this->addView($viewName, 'TpvMovimientoStock', 'tpv-stock-movements', 'fa-solid fa-dolly')
-            ->addSearchFields(['operacion', 'referencia', 'origen'])
-            ->addOrderBy(['creado', 'id'], 'date', 2)
-            ->addOrderBy(['referencia', 'creado'], 'reference')
-            ->addOrderBy(['operacion', 'referencia'], 'operation')
-            ->addOrderBy(['cantidad'], 'quantity')
-            ->addFilterPeriod('creado', 'period', 'creado', true)
-            ->addFilterAutocomplete('operacion', 'operation', 'operacion', 'tpv_movimientos_stock', 'operacion', 'operacion')
-            ->addFilterAutocomplete('referencia', 'reference', 'referencia', 'variantes', 'referencia', 'referencia')
-            ->addFilterSelect('codalmacen', 'warehouse', 'codalmacen', $this->almacenes())
-            ->addFilterSelect('motivo', 'reason', 'motivo', $this->motivos())
-            ->addFilterCheckbox('devoluciones', 'tpv-only-returns', 'cantidad', '<', 0)
+        // títulos cortos: FS corta a 15 caracteres el de las pestañas
+        $this->addView($viewName, 'Join\TpvConsumo', 'tpv-tab-consumption', 'fa-solid fa-chart-column')
+            ->addSearchFields(['tpv_movimientos_stock.referencia', 'productos.descripcion'])
+            ->addOrderBy(['valor'], 'tpv-consumption-value', 2)
+            ->addOrderBy(['consumo'], 'tpv-consumed')
+            ->addOrderBy(['tpv_movimientos_stock.referencia'], 'reference')
+            ->addFilterPeriod('creado', 'period', 'tpv_movimientos_stock.creado', true)
+            ->addFilterSelect('codalmacen', 'warehouse', 'tpv_movimientos_stock.codalmacen', $this->almacenes())
+            ->addFilterSelect('codfamilia', 'family', 'productos.codfamilia', $this->familias())
             ->setSettings('btnNew', false)
             ->setSettings('btnDelete', false)
             ->setSettings('checkBoxes', false)
             ->setSettings('clickable', false);
+    }
+
+    protected function createViewsMovimientos(string $viewName = self::VIEW_MOVIMIENTOS): void
+    {
+        // el orden por id sigue el de inserción y usa la clave primaria (el diario no tiene índice por fecha)
+        $this->addView($viewName, 'TpvMovimientoStock', 'tpv-tab-movements', 'fa-solid fa-dolly')
+            ->addSearchFields(['operacion', 'referencia', 'origen'])
+            ->addOrderBy(['id'], 'date', 2)
+            ->addOrderBy(['referencia', 'id'], 'reference')
+            ->addOrderBy(['cantidad'], 'quantity')
+            ->addFilterPeriod('creado', 'period', 'creado', true)
+            ->addFilterAutocomplete('referencia', 'reference', 'referencia', 'Variante', 'referencia', 'referencia')
+            ->addFilterSelect('codalmacen', 'warehouse', 'codalmacen', $this->almacenes())
+            ->addFilterSelect('motivo', 'reason', 'motivo', $this->motivos())
+            ->addFilterCheckbox('consumos', 'tpv-only-consumption', 'cantidad', '<', 0)
+            ->addFilterCheckbox('devoluciones', 'tpv-only-returns', 'cantidad', '>', 0)
+            ->setSettings('btnNew', false)
+            ->setSettings('btnDelete', false)
+            ->setSettings('checkBoxes', false)
+            ->setSettings('clickable', false);
+    }
+
+    protected function loadData($viewName, $view)
+    {
+        parent::loadData($viewName, $view);
+
+        // sin acceso a la ficha de producto (p. ej. solo con el rol Hosteleria), sin enlaces a ella
+        $column = $view->columnForName('description');
+        if ($column && false === $this->user->can('EditProducto')) {
+            $column->widget->onclick = '';
+        }
+
+        // descripción e idproducto de las referencias de la página en una sola consulta (son
+        // atributos perezosos del modelo; una referencia borrada se queda sin ellos)
+        if ($viewName === self::VIEW_MOVIMIENTOS && !empty($view->cursor)) {
+            TpvMovimientoStock::precargar($view->cursor);
+        }
     }
 
     private function almacenes(): array
@@ -60,19 +102,24 @@ class ListTpvMovimientoStock extends ListController
         return $values;
     }
 
-    private function motivos(): array
+    private function familias(): array
     {
-        $motivos = self::MOTIVOS;
-        $rows = TpvMovimientoStock::table()->select('motivo')->groupBy('motivo')->orderBy('motivo')->get();
-        foreach ($rows as $row) {
-            if (!in_array($row['motivo'], $motivos, true)) {
-                $motivos[] = $row['motivo'];
-            }
+        $values = [['code' => '', 'description' => '------']];
+        foreach ($this->codeModel->all('familias', 'codfamilia', 'descripcion', false) as $item) {
+            $values[] = ['code' => $item->code, 'description' => $item->description];
         }
 
+        return $values;
+    }
+
+    /**
+     * Motivos que escribe la app (no se consulta la tabla: un GROUP BY recorrería todo el diario).
+     */
+    private function motivos(): array
+    {
         $values = [['code' => '', 'description' => '------']];
-        foreach ($motivos as $motivo) {
-            $values[] = ['code' => $motivo, 'description' => $motivo];
+        foreach ([TpvMovimientoStock::MOTIVO_COMANDA, TpvMovimientoStock::MOTIVO_ANULACION] as $motivo) {
+            $values[] = ['code' => $motivo, 'description' => Tools::trans('tpv-reason-' . $motivo)];
         }
 
         return $values;

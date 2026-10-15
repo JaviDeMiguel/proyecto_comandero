@@ -9,7 +9,9 @@
  *  - id es BIGINT AUTO_INCREMENT en el DDL; "serial" aquí, porque el DbUpdater da por buena
  *    cualquier columna real frente a "serial" y es el único tipo autoincremental del XML;
  *  - sin FK a tablas de FS: es un diario y debe sobrevivir a borrados de referencias;
- *  - el índice tpv_idx_movimientos_referencia lo pone el DDL (FS solo gestiona índices "fs_").
+ *  - el índice tpv_idx_movimientos_referencia lo pone el DDL (FS solo gestiona índices "fs_"):
+ *    ningún nombre de índice tpv_* puede CONTENER la subcadena "fs_";
+ *  - cantidad = variación aplicada a stocks.cantidad: negativa = consumo, positiva = devolución.
 -->
 <table>
     <column>

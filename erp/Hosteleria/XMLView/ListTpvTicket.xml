@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
- * Plugin Hosteleria: tickets del TPV (facturas de cliente con numero2 = "TPV-...").
+ * Plugin Hosteleria: tickets del TPV (facturas de cliente con numero2 = "TPV-...") y sus
+ * rectificativas (vista ListTpvTicket-rect).
+ * observaciones = «TPV ticket N · Mesa X · Camarero Y · Precuentas nº n hh:mm importe, …» (lo
+ * anota la app: el camarero solo si lo hay y el sufijo de precuentas solo si se emitió alguna, con
+ * número, hora y total de cada una; el formato se amplía por el final). En un cobro mixto la
+ * forma de pago de la cabecera es la de la primera parte: el desglose está en los recibos.
 -->
 <view>
     <columns>
@@ -13,12 +18,15 @@
         <column name="tpv-ticket" order="110">
             <widget type="text" fieldname="numero2"/>
         </column>
+        <column name="observations" order="115">
+            <widget type="text" fieldname="observaciones"/>
+        </column>
         <column name="serie" display="none" order="120">
             <widget type="select" fieldname="codserie">
                 <values source="series" fieldcode="codserie" fieldtitle="codserie"/>
             </widget>
         </column>
-        <column name="customer" order="130">
+        <column name="customer" display="none" order="130">
             <widget type="text" fieldname="nombrecliente"/>
         </column>
         <column name="warehouse" display="none" order="140">
@@ -34,10 +42,10 @@
         <column name="paid" display="center" order="160">
             <widget type="checkbox" fieldname="pagada"/>
         </column>
-        <column name="net" display="none" order="170">
+        <column name="net" display="right" order="170">
             <widget type="money" fieldname="neto"/>
         </column>
-        <column name="taxes" display="none" order="180">
+        <column name="taxes" display="right" order="180">
             <widget type="money" fieldname="totaliva"/>
         </column>
         <column name="total" display="right" order="190">
@@ -54,9 +62,9 @@
     </columns>
     <rows>
         <row type="status">
-            <option color="dark" title="rectified-invoice" fieldname="idfacturarect">notnull:</option>
-            <option color="success" title="paid" fieldname="pagada">1</option>
-            <option color="secondary" title="invoice-without-acc-entry" fieldname="idasiento">null:</option>
+            <option color="danger" title="invoice-without-acc-entry" fieldname="idasiento">null:</option>
+            <option color="warning" title="unpaid" fieldname="pagada">0</option>
+            <option color="secondary" title="rectified-invoice" fieldname="idfacturarect">notnull:</option>
         </row>
     </rows>
 </view>

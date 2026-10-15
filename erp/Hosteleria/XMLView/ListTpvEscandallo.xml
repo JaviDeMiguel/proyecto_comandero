@@ -1,7 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
- * Plugin Hosteleria: listado general de escandallos.
- * Plato e ingrediente enlazan a la ficha del producto; la fila, a la ficha de la línea.
+ * Plugin Hosteleria: listado general de escandallos (también la pestaña «Usado en» de la ficha
+ * de producto, vista ListTpvEscandallo-usos).
+ * Plato e ingrediente enlazan a la ficha de su producto; la fila, a la ficha de la línea.
+ * Descripciones, cantidad bruta y costes los calcula Lib/TpvCosteEscandallo (y el modelo, al
+ * exportar).
 -->
 <view>
     <columns>
@@ -9,30 +12,31 @@
             <widget type="text" fieldname="id"/>
         </column>
         <column name="dish" title="tpv-dish" order="100">
-            <widget type="variante" fieldname="ref_plato" match="referencia" onclick="EditProducto"/>
+            <widget type="text" fieldname="ref_plato" onclick="EditProducto" fieldclick="plato_idproducto"/>
+        </column>
+        <column name="dish-description" title="tpv-dish-description" order="105">
+            <widget type="text" fieldname="plato_descripcion"/>
         </column>
         <column name="ingredient" title="tpv-ingredient" order="110">
-            <widget type="variante" fieldname="ref_ingrediente" match="referencia" onclick="EditProducto"/>
+            <widget type="text" fieldname="ref_ingrediente" onclick="EditProducto" fieldclick="ingrediente_idproducto"/>
         </column>
-        <column name="ingredient-description" title="description" order="120">
+        <column name="ingredient-description" title="tpv-ingredient-description" order="120">
             <widget type="text" fieldname="ingrediente_descripcion"/>
         </column>
         <column name="net-quantity" title="tpv-net-quantity" display="right" order="130">
-            <widget type="number" fieldname="cantidad" decimal="3"/>
+            <widget type="number" fieldname="cantidad" decimal="4"/>
         </column>
         <column name="waste" title="tpv-waste-pct" display="right" order="140">
-            <widget type="number" fieldname="merma" decimal="2">
-                <option color="warning">gt:0</option>
-            </widget>
+            <widget type="number" fieldname="merma" decimal="2"/>
         </column>
         <column name="gross-quantity" title="tpv-gross-quantity" display="right" order="150">
-            <widget type="number" fieldname="cantidad_bruta" decimal="3"/>
+            <widget type="number" fieldname="cantidad_bruta" decimal="4"/>
         </column>
         <column name="unit-cost" title="tpv-unit-cost" display="right" order="160">
-            <widget type="money" fieldname="coste_unitario"/>
+            <widget type="money" fieldname="coste_unitario" decimal="4" totals="false"/>
         </column>
         <column name="line-cost" title="tpv-line-cost" display="right" order="170">
-            <widget type="money" fieldname="coste_linea"/>
+            <widget type="money" fieldname="coste_linea" decimal="4" totals="false"/>
         </column>
         <column name="observations" order="180">
             <widget type="text" fieldname="observaciones"/>
@@ -43,7 +47,9 @@
     </columns>
     <rows>
         <row type="status">
+            <option color="danger" title="tpv-recipe-invalid" fieldname="coste_origen">receta-invalida</option>
             <option color="warning" title="tpv-ingredient-without-cost" fieldname="coste_origen">sin-coste</option>
+            <option color="warning" title="tpv-subrecipe-incomplete-cost" fieldname="coste_origen">receta-incompleta</option>
         </row>
     </rows>
 </view>

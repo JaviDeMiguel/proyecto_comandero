@@ -11,6 +11,8 @@
  *    ON UPDATE CASCADE; lo valida el modelo TpvEscandallo;
  *  - el índice tpv_idx_escandallos_ingrediente y ON UPDATE CURRENT_TIMESTAMP no se pueden
  *    expresar en XML (FS prefija "fs_" a los índices y solo gestiona esos): los pone el DDL.
+ *    Ningún nombre de índice tpv_* puede CONTENER la subcadena "fs_" (el DbUpdater borra
+ *    cualquier índice no declarado cuyo nombre la contenga, no solo los que empiezan por ella).
 -->
 <table>
     <column>

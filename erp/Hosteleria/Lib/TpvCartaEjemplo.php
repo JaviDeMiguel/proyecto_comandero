@@ -213,7 +213,12 @@ final class TpvCartaEjemplo
         'BEB-AGUA-GAS' => [['ROCINANTE', 'ROC-AGUAG-50', 0.35]],
     ];
 
-    /** Escandallos: plato => [[ingrediente, cantidad neta, merma %], ...]. */
+    /**
+     * Escandallos: plato => [[ingrediente, cantidad neta, merma %], ...].
+     * Las cantidades brutas son múltiplos de 0,001 o se acercan mucho: la app descuenta el stock
+     * con 3 decimales por línea de comanda (el ajo, con una neta de 0,004 y merma del 10 %, se
+     * descontaría un 10 % de menos).
+     */
     const RECETAS = [
         'BEB-CANA' => [['MP-CERVEZA-BARRIL', 0.20, 5]],
         'BEB-DOBLE' => [['MP-CERVEZA-BARRIL', 0.33, 5]],
@@ -224,7 +229,7 @@ final class TpvCartaEjemplo
         'BEB-CAFE-LECHE' => [['MP-CAFE', 0.007, 0], ['MP-LECHE', 0.15, 5], ['MP-AZUCAR', 0.008, 0]],
         'BEB-INFUSION' => [['MP-INFUSION', 1, 0], ['MP-AZUCAR', 0.008, 0]],
         'PLA-GAZPACHO' => [
-            ['MP-TOMATE', 0.30, 5], ['MP-PIMIENTO-VERDE', 0.04, 15], ['MP-AJO', 0.004, 10],
+            ['MP-TOMATE', 0.30, 5], ['MP-PIMIENTO-VERDE', 0.04, 15], ['MP-AJO', 0.0045, 10],
             ['MP-PAN', 0.03, 0], ['MP-ACEITE', 0.03, 0],
         ],
         'PLA-QUESO' => [['MP-QUESO', 0.15, 8]],
@@ -240,7 +245,7 @@ final class TpvCartaEjemplo
             ['MP-PATATA', 0.20, 15], ['MP-HUEVO', 2, 0], ['MP-CEBOLLA', 0.04, 10], ['MP-ACEITE', 0.05, 0],
         ],
         'PLA-BRAVAS' => [
-            ['MP-PATATA', 0.30, 15], ['MP-ACEITE', 0.05, 0], ['MP-TOMATE', 0.04, 5], ['MP-AJO', 0.002, 10],
+            ['MP-PATATA', 0.30, 15], ['MP-ACEITE', 0.05, 0], ['MP-TOMATE', 0.04, 5], ['MP-AJO', 0.0018, 10],
         ],
         'PLA-MIGAS' => [
             ['MP-PAN', 0.20, 0], ['MP-CHORIZO', 0.06, 0], ['MP-AJO', 0.01, 10],
@@ -248,7 +253,7 @@ final class TpvCartaEjemplo
         ],
         'PLA-PAELLA' => [
             ['MP-ARROZ', 0.10, 0], ['MP-POLLO', 0.12, 10], ['MP-CALAMAR', 0.05, 30],
-            ['MP-PIMIENTO-ROJO', 0.04, 15], ['MP-TOMATE', 0.04, 5], ['MP-AJO', 0.003, 10], ['MP-ACEITE', 0.02, 0],
+            ['MP-PIMIENTO-ROJO', 0.04, 15], ['MP-TOMATE', 0.04, 5], ['MP-AJO', 0.0027, 10], ['MP-ACEITE', 0.02, 0],
         ],
         'PLA-PISTO' => [
             ['MP-TOMATE', 0.25, 5], ['MP-PIMIENTO-VERDE', 0.10, 15], ['MP-PIMIENTO-ROJO', 0.10, 15],
@@ -317,6 +322,8 @@ final class TpvCartaEjemplo
 
         if (false === $ok) {
             $db->rollback();
+            // no se ha guardado nada: el resumen no puede contar nada como creado
+            $this->resumen = [];
             Tools::log()->error('tpv-menu-load-error');
             return false;
         }
@@ -416,13 +423,13 @@ final class TpvCartaEjemplo
             }
         }
 
-        // stock, coste y precios de compra: solo de lo creado ahora
-        foreach (self::STOCK as $ref => [$coste, $cantidad, $minimo, $maximo]) {
+        // stock, precios de compra y coste: solo de lo creado ahora
+        foreach (self::STOCK as $ref => [, $cantidad, $minimo, $maximo]) {
             if (!isset($creados[$ref])) {
                 $this->resumen['stocks'][1]++;
                 continue;
             }
-            if (false === $this->crearStock($ref, $codalmacen, $coste, $cantidad, $minimo, $maximo)) {
+            if (false === $this->crearStock($ref, $codalmacen, $cantidad, $minimo, $maximo)) {
                 return false;
             }
             $this->resumen['stocks'][0]++;
@@ -434,10 +441,20 @@ final class TpvCartaEjemplo
                     $this->resumen['precios'][1]++;
                     continue;
                 }
-                if (false === $this->crearPrecioCompra($ref, $codproveedor, $refproveedor, $precio)) {
+                $resultado = $this->crearPrecioCompra($ref, $codproveedor, $refproveedor, $precio);
+                if (null === $resultado) {
                     return false;
                 }
-                $this->resumen['precios'][0]++;
+                $this->resumen['precios'][$resultado ? 0 : 1]++;
+            }
+        }
+
+        // el coste se fija DESPUÉS de los precios de proveedor: al crear cada uno, el núcleo
+        // recalcula variantes.coste según la política de precio de coste (CostPriceTools) y, con
+        // «precio actual» y sin compras, lo dejaría en 0
+        foreach (self::STOCK as $ref => [$coste]) {
+            if (isset($creados[$ref]) && false === $this->fijarCoste($ref, $coste)) {
+                return false;
             }
         }
 
@@ -463,11 +480,14 @@ final class TpvCartaEjemplo
         return true;
     }
 
-    private function crearPrecioCompra(string $ref, string $codproveedor, string $refproveedor, float $precio): bool
+    /**
+     * @return bool|null true = creado, false = ya existía, null = error
+     */
+    private function crearPrecioCompra(string $ref, string $codproveedor, string $refproveedor, float $precio): ?bool
     {
         $where = [Where::eq('referencia', $ref), Where::eq('codproveedor', $codproveedor)];
         if (ProductoProveedor::count($where) > 0) {
-            return true;
+            return false;
         }
 
         $fila = new ProductoProveedor();
@@ -477,7 +497,7 @@ final class TpvCartaEjemplo
         $fila->precio = $precio;
         if (false === $fila->save()) {
             Tools::log()->error('tpv-menu-save-error', ['%item%' => $ref . ' / ' . $codproveedor]);
-            return false;
+            return null;
         }
 
         return true;
@@ -514,19 +534,35 @@ final class TpvCartaEjemplo
         return true;
     }
 
-    private function crearStock(string $ref, string $codalmacen, float $coste, float $cantidad, float $minimo, float $maximo): bool
+    /**
+     * Coste de compra de la variante (lo usan el coste teórico de los escandallos y la app).
+     */
+    private function fijarCoste(string $ref, float $coste): bool
     {
         $variante = new Variante();
         if (false === $variante->loadWhereEq('referencia', $ref)) {
             Tools::log()->error('tpv-menu-save-error', ['%item%' => $ref]);
             return false;
         }
-        if (abs((float)$variante->coste - $coste) > 0.000001) {
-            $variante->coste = $coste;
-            if (false === $variante->save()) {
-                Tools::log()->error('tpv-menu-save-error', ['%item%' => $ref]);
-                return false;
-            }
+        if (abs((float)$variante->coste - $coste) <= 0.000001) {
+            return true;
+        }
+
+        $variante->coste = $coste;
+        if (false === $variante->save()) {
+            Tools::log()->error('tpv-menu-save-error', ['%item%' => $ref]);
+            return false;
+        }
+
+        return true;
+    }
+
+    private function crearStock(string $ref, string $codalmacen, float $cantidad, float $minimo, float $maximo): bool
+    {
+        $variante = new Variante();
+        if (false === $variante->loadWhereEq('referencia', $ref)) {
+            Tools::log()->error('tpv-menu-save-error', ['%item%' => $ref]);
+            return false;
         }
 
         $where = [Where::eq('referencia', $ref), Where::eq('codalmacen', $codalmacen)];

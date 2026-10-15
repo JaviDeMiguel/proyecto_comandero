@@ -6,6 +6,7 @@
 namespace FacturaScripts\Plugins\Hosteleria\Lib;
 
 use FacturaScripts\Core\Tools;
+use InvalidArgumentException;
 use mysqli;
 use mysqli_driver;
 use mysqli_sql_exception;
@@ -14,41 +15,49 @@ use Throwable;
 /**
  * Sentencias CREATE USER / GRANT para el usuario de MySQL del TPV, con privilegios mínimos
  * (exactamente lo que ejecuta la app, ver stock_repository.dart y escandallo_repository.dart):
- *  - stocks: SELECT, INSERT, UPDATE (INSERT ... ON DUPLICATE KEY UPDATE de cantidad y disponible);
- *  - productos: SELECT y UPDATE solo de las columnas stockfis y actualizado;
- *  - variantes: SELECT, UPDATE solo de stockfis y REFERENCES solo de referencia (la clave ajena
- *    de las tablas tpv_* si es la app quien las crea);
- *  - solo lectura en productosprov, proveedores y familias (reaprovisionamiento);
- *  - tpv_escandallos y tpv_movimientos_stock: SELECT, INSERT, UPDATE, DELETE y CREATE
- *    (CREATE TABLE IF NOT EXISTS). Sin DROP, ALTER, INDEX ni TRIGGER: quien obtenga las
- *    credenciales de la tableta no puede borrar el diario de idempotencia ni cambiar precios.
+ *  - stocks: SELECT, INSERT y UPDATE solo de cantidad y disponible (INSERT ... ON DUPLICATE KEY
+ *    UPDATE): no puede tocar stockmin, stockmax, pterecibir ni reservada;
+ *  - productos: SELECT y UPDATE solo de stockfis y actualizado;
+ *  - variantes: SELECT y UPDATE solo de stockfis (no puede cambiar precios ni costes);
+ *  - solo lectura en productosprov y proveedores (reaprovisionamiento);
+ *  - tpv_escandallos: SELECT, INSERT, UPDATE y DELETE (la pantalla de recetas de la app);
+ *  - tpv_movimientos_stock: SELECT e INSERT. Sin UPDATE ni DELETE: quien obtenga las
+ *    credenciales de la tableta no puede borrar ni reescribir el diario de idempotencia.
+ * Sin CREATE, DROP, ALTER, INDEX, REFERENCES ni TRIGGER: las tablas tpv_* las crea el plugin (al
+ * activarse, en «Crear tablas» y antes de generar estas sentencias). MySQL 8 exige REFERENCES a
+ * nivel de TABLA sobre variantes para crear la clave ajena, así que la app no las podría crear con
+ * este usuario; no le hace falta (TpvSchemaMigrator solo crea las que faltan).
  *
- * Seguridad de "Ejecutar ahora":
+ * Seguridad de «Ejecutar ahora»:
  *  - nunca sobre la cuenta de FacturaScripts (db_user de config.php) ni sobre cuentas del
  *    sistema (root, mysql.*, debian-sys-maint...): errores() las rechaza;
- *  - si la cuenta no existe se crea con CREATE USER (sin IF NOT EXISTS, que fallaría en silencio);
+ *  - si la cuenta no existe se crea con CREATE USER (sin IF NOT EXISTS, que fallaría en silencio)
+ *    y, si después falla algún GRANT, se borra (DROP USER) para no dejarla a medias;
  *  - si ya existe no se toca, salvo que se pida explícitamente restablecer su contraseña
- *    (casilla con su propia confirmación): entonces ALTER USER, se retiran los privilegios de
- *    tabla anteriores sobre estas tablas y se conceden los mínimos.
+ *    (casilla con su propia confirmación) Y la cuenta sea del TPV: solo puede tener USAGE global y
+ *    privilegios sobre estas tablas de la base de datos de FacturaScripts (SHOW GRANTS). Así no se
+ *    puede usar para tomar la cuenta de otra aplicación del servidor. Se retiran entonces sus
+ *    privilegios sobre estas tablas (y las de versiones anteriores) y se conceden los mínimos.
  *
  * Las sentencias solo se ejecutan a petición explícita del usuario y con una conexión mysqli
  * propia (no con DataBase de FacturaScripts, que guarda el SQL en el historial y mostraría la
- * contraseña). La contraseña no se guarda en ningún sitio: se muestra una vez.
+ * contraseña). La contraseña no se guarda en ningún sitio.
  */
 final class TpvMysqlUsuario
 {
-    /** Privilegios por tabla de FacturaScripts (por columna donde la app solo escribe algunas). */
+    /** Privilegios por tabla (por columna donde la app solo escribe algunas). */
     const PRIVILEGIOS = [
-        'stocks' => 'SELECT, INSERT, UPDATE',
-        'variantes' => 'SELECT, UPDATE (stockfis), REFERENCES (referencia)',
+        'stocks' => 'SELECT, INSERT, UPDATE (cantidad, disponible)',
+        'variantes' => 'SELECT, UPDATE (stockfis)',
         'productos' => 'SELECT, UPDATE (stockfis, actualizado)',
         'productosprov' => 'SELECT',
         'proveedores' => 'SELECT',
-        'familias' => 'SELECT',
+        TpvSchema::TABLE_ESCANDALLOS => 'SELECT, INSERT, UPDATE, DELETE',
+        TpvSchema::TABLE_MOVIMIENTOS => 'SELECT, INSERT',
     ];
 
-    /** Privilegios sobre las tablas propias del TPV (TpvSchema::TABLES). */
-    const PRIVILEGIOS_TPV = 'SELECT, INSERT, UPDATE, DELETE, CREATE';
+    /** Tablas sobre las que versiones anteriores del plugin concedían privilegios (se revocan al restablecer). */
+    const TABLAS_ANTERIORES = ['familias'];
 
     /** Cuentas que nunca se crean ni se modifican desde aquí (además del db_user de config.php). */
     const CUENTAS_RESERVADAS = [
@@ -120,6 +129,32 @@ final class TpvMysqlUsuario
     }
 
     /**
+     * true si SHOW GRANTS de la cuenta solo contiene USAGE global y privilegios sobre las tablas
+     * del TPV (actuales o de versiones anteriores) de la base de datos de FacturaScripts.
+     *
+     * @param string[] $grants líneas de SHOW GRANTS
+     */
+    public static function esCuentaDelTpv(array $grants): bool
+    {
+        $tablas = array_merge(array_keys(self::PRIVILEGIOS), self::TABLAS_ANTERIORES);
+        foreach ($grants as $grant) {
+            $grant = trim((string)$grant);
+            if (1 === preg_match('/^GRANT USAGE ON \*\.\* TO /i', $grant)) {
+                continue;
+            }
+
+            if (1 !== preg_match('/^GRANT (.+?) ON `([^`]+)`\.`([^`]+)` TO /i', $grant, $m)
+                || stripos($grant, 'WITH GRANT OPTION') !== false
+                || $m[2] !== self::baseDatos()
+                || false === in_array(strtolower($m[3]), $tablas, true)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
      * Errores de validación (claves de traducción). Vacío si todo es válido.
      *
      * @return string[]
@@ -160,33 +195,34 @@ final class TpvMysqlUsuario
     /**
      * Sentencias SQL (sin punto y coma final).
      *  - Cuenta nueva: CREATE USER (sin IF NOT EXISTS: si ya existe, falla sin tocar nada) y GRANT.
-     *  - Restablecer una cuenta existente: ALTER USER (contraseña y TLS), REVOKE de los privilegios
-     *    de tabla anteriores sobre estas tablas (versiones antiguas concedían de más) y GRANT.
+     *  - Restablecer una cuenta del TPV: ALTER USER (contraseña y TLS), REVOKE de sus privilegios
+     *    sobre estas tablas (y las de versiones anteriores) y GRANT.
+     * Las tablas tpv_* deben existir (los GRANT sin CREATE no admiten tablas inexistentes).
      *
      * @return string[]
+     * @throws InvalidArgumentException si los datos no son válidos (errores() no vacío)
      */
     public function sentencias(bool $restablecer = false): array
     {
+        if (!empty($this->errores())) {
+            throw new InvalidArgumentException('tpv-mysql-invalid-data');
+        }
+
         $cuenta = $this->cuenta();
         $db = '`' . self::baseDatos() . '`';
         $require = $this->tls ? 'REQUIRE SSL' : 'REQUIRE NONE';
         $pass = "'" . $this->password . "'";
 
-        $tablas = self::PRIVILEGIOS;
-        foreach (TpvSchema::TABLES as $tabla) {
-            $tablas[$tabla] = self::PRIVILEGIOS_TPV;
-        }
-
         $sql = [];
         if ($restablecer) {
             $sql[] = 'ALTER USER ' . $cuenta . ' IDENTIFIED BY ' . $pass . ' ' . $require;
-            foreach (array_keys($tablas) as $tabla) {
+            foreach (array_merge(array_keys(self::PRIVILEGIOS), self::TABLAS_ANTERIORES) as $tabla) {
                 $sql[] = 'REVOKE ALL PRIVILEGES ON ' . $db . '.`' . $tabla . '` FROM ' . $cuenta;
             }
         } else {
             $sql[] = 'CREATE USER ' . $cuenta . ' IDENTIFIED BY ' . $pass . ' ' . $require;
         }
-        foreach ($tablas as $tabla => $privilegios) {
+        foreach (self::PRIVILEGIOS as $tabla => $privilegios) {
             $sql[] = 'GRANT ' . $privilegios . ' ON ' . $db . '.`' . $tabla . '` TO ' . $cuenta;
         }
 
@@ -203,7 +239,7 @@ final class TpvMysqlUsuario
 
     /**
      * Ejecuta las sentencias con una conexión propia con el usuario de config.php.
-     * Si la cuenta ya existe no hace nada, salvo que $restablecer sea true.
+     * Si la cuenta ya existe no hace nada, salvo que $restablecer sea true y sea una cuenta del TPV.
      * Devuelve [ok, mensaje]. El mensaje nunca contiene la contraseña.
      *
      * @return array{0: bool, 1: string}
@@ -217,7 +253,7 @@ final class TpvMysqlUsuario
             return [false, Tools::trans('tpv-mysql-only')];
         }
         if (false === class_exists(mysqli::class)) {
-            return [false, 'mysqli'];
+            return [false, Tools::trans('tpv-mysql-no-mysqli')];
         }
 
         $link = null;
@@ -259,12 +295,25 @@ final class TpvMysqlUsuario
         // si consta que no existe, se crea aunque se pidiera restablecer
         $restablecer = $restablecer && $existe !== false;
 
+        // restablecer solo cuentas del TPV: si no se pueden leer sus privilegios, no se toca
+        if ($restablecer) {
+            $grants = $this->grants($link);
+            if (null === $grants) {
+                return [false, Tools::trans('tpv-mysql-cannot-verify-account', ['%account%' => $this->cuenta()])];
+            }
+            if (false === self::esCuentaDelTpv($grants)) {
+                return [false, Tools::trans('tpv-mysql-not-tpv-account', ['%account%' => $this->cuenta()])];
+            }
+        }
+
         $sentencias = $this->sentencias($restablecer);
         $hecho = 0;
+        $creada = false;
         foreach ($sentencias as $num => $sql) {
             try {
                 $link->query($sql);
                 $hecho++;
+                $creada = $creada || ($num === 0 && false === $restablecer);
             } catch (mysqli_sql_exception $e) {
                 $codigo = $e->getCode();
                 if (0 === strpos($sql, 'REVOKE ') && in_array($codigo, self::ERRNO_REVOKE_SIN_GRANT, true)) {
@@ -279,7 +328,9 @@ final class TpvMysqlUsuario
                     return [false, Tools::trans($clave, ['%account%' => $this->cuenta()])];
                 }
 
-                return [false, Tools::trans('tpv-mysql-execute-error', [
+                // una cuenta recién creada no se deja a medias (sin privilegios o con parte de ellos)
+                $deshecha = $creada && $this->borrarCuenta($link);
+                return [false, Tools::trans($deshecha ? 'tpv-mysql-execute-error-undone' : 'tpv-mysql-execute-error', [
                     '%num%' => $num + 1,
                     '%total%' => count($sentencias),
                     '%count%' => $hecho,
@@ -312,7 +363,41 @@ final class TpvMysqlUsuario
             $existe = $stmt->num_rows > 0;
             $stmt->close();
             return $existe;
-        } catch (mysqli_sql_exception $e) {
+        } catch (mysqli_sql_exception) {
+            return null;
+        }
+    }
+
+    private function borrarCuenta(mysqli $link): bool
+    {
+        try {
+            $link->query('DROP USER ' . $this->cuenta());
+            return true;
+        } catch (mysqli_sql_exception) {
+            return false;
+        }
+    }
+
+    /**
+     * Líneas de SHOW GRANTS de la cuenta, o null si no se pueden leer.
+     *
+     * @return string[]|null
+     */
+    private function grants(mysqli $link): ?array
+    {
+        try {
+            $result = $link->query('SHOW GRANTS FOR ' . $this->cuenta());
+            if (false === $result || true === $result) {
+                return null;
+            }
+
+            $grants = [];
+            while ($row = $result->fetch_row()) {
+                $grants[] = (string)$row[0];
+            }
+            $result->free();
+            return $grants;
+        } catch (mysqli_sql_exception) {
             return null;
         }
     }

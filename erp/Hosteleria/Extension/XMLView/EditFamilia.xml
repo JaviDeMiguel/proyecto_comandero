@@ -2,7 +2,8 @@
 <!--
  * Plugin Hosteleria: destino de impresión de la comanda (familias.tpv_destino).
  * Vacío = hereda de la familia madre (y, si nadie lo define, el destino por defecto del TPV).
- * Extension/Controller/EditFamilia cambia el texto de la opción vacía por "Heredar".
+ * Extension/Controller/EditFamilia cambia el texto de la opción vacía por "Heredar" y calcula el
+ * destino efectivo en el ERP (las reglas de enrutamiento del TPV tienen prioridad en cada nivel).
 -->
 <view>
     <columns>
@@ -13,7 +14,7 @@
                     <values title="tpv-bar">barra</values>
                 </widget>
             </column>
-            <column name="tpv-destination-effective" title="tpv-destination-effective" numcolumns="3" order="150">
+            <column name="tpv-destination-effective" title="tpv-destination-effective" description="tpv-destination-effective-desc" numcolumns="3" order="150">
                 <widget type="text" fieldname="tpv_destino_efectivo" readonly="true"/>
             </column>
         </group>

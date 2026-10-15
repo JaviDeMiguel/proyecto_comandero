@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
- * Plugin Hosteleria: cierres Z del TPV (asientos con documento = "Z-...").
+ * Plugin Hosteleria: asientos de los cierres Z del TPV (asientos con documento = "Z-...").
+ * En el modo por defecto de la app («solo descuadre») solo hay asiento cuando la caja no cuadra y
+ * su importe es el descuadre (la ayuda del pie lo explica).
 -->
 <view>
     <columns>
@@ -33,6 +35,9 @@
     <rows>
         <row type="status">
             <option color="warning" title="non-editable-accounting-entry" fieldname="editable">0</option>
+        </row>
+        <row type="footer">
+            <group name="tpv-help" numcolumns="12" label="tpv-z-closures-help"/>
         </row>
     </rows>
 </view>

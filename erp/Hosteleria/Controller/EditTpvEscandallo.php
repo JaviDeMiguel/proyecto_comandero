@@ -6,6 +6,7 @@
 namespace FacturaScripts\Plugins\Hosteleria\Controller;
 
 use FacturaScripts\Core\Lib\ExtendedController\EditController;
+use FacturaScripts\Dinamic\Model\TpvEscandallo;
 use FacturaScripts\Plugins\Hosteleria\Lib\TpvCosteEscandallo;
 
 /**
@@ -33,19 +34,23 @@ class EditTpvEscandallo extends EditController
     {
         parent::loadData($viewName, $view);
 
-        if ($viewName === $this->getMainViewName() && $view->model->exists()) {
-            (new TpvCosteEscandallo())->decorar([$view->model]);
+        // el modelo de la pestaña principal es la línea (BaseView lo declara como ModelClass genérico)
+        $linea = $view->model;
+        if ($viewName !== $this->mainTabName() || false === ($linea instanceof TpvEscandallo) || false === $linea->exists()) {
+            return;
+        }
 
-            // enlace a la ficha del producto del plato
-            $plato = $view->model->getPlato();
-            if ($plato) {
-                $view->addButton([
-                    'action' => $plato->url() . '&activetab=EditTpvEscandalloProducto',
-                    'icon' => 'fa-solid fa-utensils',
-                    'label' => 'tpv-recipe',
-                    'type' => 'link',
-                ]);
-            }
+        (new TpvCosteEscandallo())->decorar([$linea]);
+
+        // enlace a la receta completa en la ficha del producto del plato (si el usuario puede abrirla)
+        $idproducto = $linea->plato_idproducto;
+        if ($idproducto && $this->user->can('EditProducto')) {
+            $view->addButton([
+                'action' => 'EditProducto?code=' . $idproducto . '&activetab=EditTpvEscandalloProducto',
+                'icon' => 'fa-solid fa-utensils',
+                'label' => 'tpv-recipe',
+                'type' => 'link',
+            ]);
         }
     }
 }

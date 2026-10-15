@@ -8,41 +8,32 @@
 namespace FacturaScripts\Plugins\Hosteleria;
 
 use FacturaScripts\Core\Base\DataBase;
-use FacturaScripts\Core\Model\Role;
-use FacturaScripts\Core\Model\RoleAccess;
 use FacturaScripts\Core\Template\InitClass;
 use FacturaScripts\Core\Tools;
-use FacturaScripts\Core\Where;
 use FacturaScripts\Dinamic\Model\Familia;
 use FacturaScripts\Dinamic\Model\TpvEscandallo;
 use FacturaScripts\Dinamic\Model\TpvMovimientoStock;
 use FacturaScripts\Dinamic\Model\Variante;
+use FacturaScripts\Plugins\Hosteleria\Lib\TpvRol;
 use FacturaScripts\Plugins\Hosteleria\Lib\TpvSchema;
 
 final class Init extends InitClass
 {
     /** Rol con acceso a las páginas del plugin (para usuarios no administradores). */
-    const ROLE_NAME = 'Hosteleria';
+    const ROLE_NAME = TpvRol::ROLE_NAME;
 
-    /**
-     * Páginas del plugin que se añaden al rol. Los módulos posteriores añaden aquí sus
-     * controladores. ConfigurarTpv NO está: solo la usan administradores (muestra la clave de
-     * la API y puede crear usuarios de MySQL).
-     */
-    const PAGES = [
-        'EditTpvEscandallo',
-        'ListTpvCierreZ',
-        'ListTpvEscandallo',
-        'ListTpvMovimientoStock',
-        'ListTpvTicket',
-    ];
+    /** Páginas del plugin que se añaden al rol (ver Lib/TpvRol). */
+    const PAGES = TpvRol::PAGES;
 
     public function init(): void
     {
         $this->loadExtension(new Extension\Controller\EditFamilia());
         $this->loadExtension(new Extension\Controller\EditProducto());
         $this->loadExtension(new Extension\Controller\ListFamilia());
+        $this->loadExtension(new Extension\Model\FacturaCliente());
         $this->loadExtension(new Extension\Model\Familia());
+        $this->loadExtension(new Extension\Model\Producto());
+        $this->loadExtension(new Extension\Model\Variante());
     }
 
     public function uninstall(): void
@@ -52,10 +43,20 @@ final class Init extends InitClass
     }
 
     /**
-     * Se ejecuta al activar o actualizar el plugin. Todo lo que hace es idempotente.
+     * Se ejecuta al activar el plugin (y al subir su ZIP con el plugin activo). Copiar los ficheros
+     * a mano no lo ejecuta: en ese caso hay que pulsar «Reconstruir» en Plugins y reparar el rol
+     * desde «Configurar TPV» (o desactivar y activar el plugin). Todo lo que hace es idempotente.
      */
     public function update(): void
     {
+        // la app del TPV solo trabaja con MySQL / MariaDB (DDL propio, SQL directo)
+        $db = new DataBase();
+        $db->connect();
+        if ('mysql' !== strtolower($db->type())) {
+            Tools::log()->error('tpv-mysql-only');
+            return;
+        }
+
         // tablas del núcleo de las que dependemos; familias recibe la columna tpv_destino
         new Variante();
         new Familia();
@@ -66,50 +67,6 @@ final class Init extends InitClass
         new TpvEscandallo();
         new TpvMovimientoStock();
 
-        $this->createRole();
-    }
-
-    private function createRole(): void
-    {
-        new Role();
-        new RoleAccess();
-
-        $dataBase = new DataBase();
-        $dataBase->beginTransaction();
-
-        $role = new Role();
-        if (false === $role->load(self::ROLE_NAME)) {
-            $role->codrole = self::ROLE_NAME;
-            $role->descripcion = 'Hostelería (TPV)';
-            if (false === $role->save()) {
-                $dataBase->rollback();
-                Tools::log()->warning('tpv-role-save-error');
-                return;
-            }
-        }
-
-        foreach (self::PAGES as $pageName) {
-            $access = new RoleAccess();
-            $where = [
-                Where::eq('codrole', self::ROLE_NAME),
-                Where::eq('pagename', $pageName),
-            ];
-            if ($access->loadWhere($where)) {
-                continue;
-            }
-
-            $access->allowdelete = true;
-            $access->allowupdate = true;
-            $access->codrole = self::ROLE_NAME;
-            $access->pagename = $pageName;
-            $access->onlyownerdata = false;
-            if (false === $access->save()) {
-                $dataBase->rollback();
-                Tools::log()->warning('tpv-role-save-error');
-                return;
-            }
-        }
-
-        $dataBase->commit();
+        TpvRol::crear();
     }
 }

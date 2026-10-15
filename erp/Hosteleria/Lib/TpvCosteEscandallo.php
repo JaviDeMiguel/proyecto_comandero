@@ -6,38 +6,40 @@
 namespace FacturaScripts\Plugins\Hosteleria\Lib;
 
 use FacturaScripts\Core\Where;
-use FacturaScripts\Dinamic\Model\Producto;
 use FacturaScripts\Dinamic\Model\TpvEscandallo;
-use FacturaScripts\Dinamic\Model\Variante;
 
 /**
- * Coste teórico de un plato a partir de su escandallo.
- *
- * coste de línea = cantidad bruta (neta / (1 - merma / 100)) x coste unitario del ingrediente.
- * Coste unitario del ingrediente = variantes.coste; si es 0 y el ingrediente tiene receta propia
- * (semielaborado), se usa el coste teórico de esa receta (recursivo, con protección de ciclos).
+ * Coste teórico de un plato a partir de su escandallo, con la MISMA regla que el motor de
+ * escandallos de la app (TpvGrafoRecetas):
+ *  - cantidad bruta de una línea = neta / (1 - merma / 100);
+ *  - un ingrediente con receta propia (semielaborado) se expande siempre hasta sus hojas: su
+ *    coste es el de su receta y el coste de su ficha se ignora (el TPV descuenta las hojas);
+ *  - una hoja cuesta lo que diga su ficha (variantes.coste > 0); si no tiene coste, el coste del
+ *    plato queda incompleto (cota inferior) y se lista en sin_coste;
+ *  - una receta cíclica o de más de TpvGrafoRecetas::MAX_PROFUNDIDAD niveles no tiene coste.
  * El margen se calcula frente al precio de venta SIN impuestos de la variante del plato.
  */
 final class TpvCosteEscandallo
 {
-    const MAX_DEPTH = 10;
-
     const ORIGEN_FICHA = 'ficha';
     const ORIGEN_RECETA = 'receta';
+    const ORIGEN_RECETA_INCOMPLETA = 'receta-incompleta';
+    const ORIGEN_RECETA_INVALIDA = 'receta-invalida';
     const ORIGEN_SIN_COSTE = 'sin-coste';
 
-    /** @var array<string, array{coste: float, origen: string}> */
+    /** @var array<string, array> datos de TpvCatalogo::variantes() */
+    private $datos = [];
+
+    /** @var TpvGrafoRecetas|null */
+    private $grafo = null;
+
+    /** @var array<string, array{coste: float, origen: string, faltan: string[]}> */
     private $memo = [];
-
-    /** @var array<string, Variante|null> */
-    private $variantes = [];
-
-    /** @var array<int, string> */
-    private $descripciones = [];
 
     /**
      * Calcula el coste de cada línea (añade atributos dinámicos a cada TpvEscandallo:
-     * cantidad_bruta, coste_unitario, coste_linea, coste_origen, ingrediente_descripcion)
+     * cantidad_bruta, descuento_tpv, coste_unitario, coste_linea, coste_origen,
+     * ingrediente_descripcion, ingrediente_idproducto, plato_descripcion, plato_idproducto)
      * y devuelve el resumen por plato.
      *
      * @param TpvEscandallo[] $lineas
@@ -46,30 +48,46 @@ final class TpvCosteEscandallo
      */
     public function decorar(array $lineas): array
     {
+        $this->precargar($lineas);
+
         $resumen = [];
         foreach ($lineas as $linea) {
+            $plato = (string)$linea->ref_plato;
+            $ingrediente = (string)$linea->ref_ingrediente;
             $bruta = $linea->cantidadBruta();
-            $unitario = $this->costeUnitario((string)$linea->ref_ingrediente);
+            $unitario = $this->costeUnitario($ingrediente);
             $costeLinea = round($bruta * $unitario['coste'], 5);
 
             $linea->cantidad_bruta = round($bruta, 5);
+            // un semielaborado no se descuenta: el TPV descuenta sus materias primas
+            $linea->descuento_tpv = $this->grafo()->tieneReceta($ingrediente) ? null : round($bruta, TpvEscandallo::DECIMALES_STOCK);
             $linea->coste_unitario = $unitario['coste'];
             $linea->coste_linea = $costeLinea;
             $linea->coste_origen = $unitario['origen'];
-            $linea->ingrediente_descripcion = $this->descripcion((string)$linea->ref_ingrediente);
+            $linea->ingrediente_descripcion = $this->dato($ingrediente, 'descripcion', '');
+            $linea->ingrediente_idproducto = $this->dato($ingrediente, 'idproducto');
+            $linea->plato_descripcion = $this->dato($plato, 'descripcion', '');
+            $linea->plato_idproducto = $this->dato($plato, 'idproducto');
 
-            $ref = (string)$linea->ref_plato;
-            if (false === isset($resumen[$ref])) {
-                $resumen[$ref] = $this->cabecera($ref);
+            if (false === isset($resumen[$plato])) {
+                $resumen[$plato] = $this->cabecera($plato);
             }
-            $resumen[$ref]['coste'] += $costeLinea;
-            $resumen[$ref]['lineas']++;
-            if ($unitario['origen'] === self::ORIGEN_SIN_COSTE) {
-                $resumen[$ref]['sin_coste'][] = (string)$linea->ref_ingrediente;
+            $resumen[$plato]['coste'] += $costeLinea;
+            $resumen[$plato]['lineas']++;
+            foreach ($unitario['faltan'] as $falta) {
+                $resumen[$plato]['sin_coste'][$falta] = $falta;
+            }
+            if ($unitario['origen'] === self::ORIGEN_RECETA_INVALIDA) {
+                $resumen[$plato]['invalida'] = true;
             }
         }
 
         foreach ($resumen as $ref => $item) {
+            // la receta del propio plato también puede pasar del límite (exactamente un nivel más
+            // que la de su ingrediente más profundo): la app no lo resolvería
+            if ($this->grafo()->tieneReceta((string)$ref) && null === $this->grafo()->hojasPorUnidad((string)$ref)) {
+                $item['invalida'] = true;
+            }
             $resumen[$ref] = $this->cerrar($item);
         }
 
@@ -83,93 +101,152 @@ final class TpvCosteEscandallo
     {
         $lineas = TpvEscandallo::all([Where::eq('ref_plato', $refPlato)], ['ref_ingrediente' => 'ASC'], 0, 0);
         $resumen = $this->decorar($lineas);
-        return $resumen[$refPlato] ?? $this->cerrar($this->cabecera($refPlato));
+        if (isset($resumen[$refPlato])) {
+            return $resumen[$refPlato];
+        }
+
+        $this->precargarReferencias([$refPlato]);
+        return $this->cerrar($this->cabecera($refPlato));
     }
 
     /**
-     * Coste unitario de una referencia y de dónde sale (ficha de la variante o receta propia).
+     * Coste unitario de una referencia y de dónde sale: ficha (hoja con coste), sin-coste (hoja
+     * sin coste), receta (semielaborado con todas sus hojas con coste), receta-incompleta (falta
+     * el coste de alguna hoja: faltan) o receta-invalida (ciclo o demasiados niveles).
      *
-     * @return array{coste: float, origen: string}
+     * @return array{coste: float, origen: string, faltan: string[]}
      */
-    public function costeUnitario(string $referencia, array $pila = []): array
+    public function costeUnitario(string $referencia): array
     {
-        $key = mb_strtolower($referencia);
-        if (isset($this->memo[$key])) {
-            return $this->memo[$key];
+        if (isset($this->memo[$referencia])) {
+            return $this->memo[$referencia];
         }
 
-        $variante = $this->variante($referencia);
-        $coste = $variante ? (float)$variante->coste : 0.0;
-        if ($coste > 0) {
-            return $this->memo[$key] = ['coste' => $coste, 'origen' => self::ORIGEN_FICHA];
+        $grafo = $this->grafo();
+        if (false === $grafo->tieneReceta($referencia)) {
+            $coste = (float)$this->dato($referencia, 'coste', 0.0);
+            return $this->memo[$referencia] = $coste > 0 ?
+                ['coste' => $coste, 'origen' => self::ORIGEN_FICHA, 'faltan' => []] :
+                ['coste' => 0.0, 'origen' => self::ORIGEN_SIN_COSTE, 'faltan' => [$referencia]];
         }
 
-        // semielaborado sin coste en ficha: coste teórico de su propia receta
-        if (count($pila) < self::MAX_DEPTH && false === in_array($key, $pila, true)) {
-            $pila[] = $key;
-            $lineas = TpvEscandallo::all([Where::eq('ref_plato', $referencia)], [], 0, 0);
-            if (!empty($lineas)) {
-                $total = 0.0;
-                foreach ($lineas as $linea) {
-                    $sub = $this->costeUnitario((string)$linea->ref_ingrediente, $pila);
-                    $total += $linea->cantidadBruta() * $sub['coste'];
-                }
-                if ($total > 0) {
-                    return $this->memo[$key] = ['coste' => round($total, 5), 'origen' => self::ORIGEN_RECETA];
-                }
+        $hojas = $grafo->hojasPorUnidad($referencia);
+        if (null === $hojas) {
+            return $this->memo[$referencia] = ['coste' => 0.0, 'origen' => self::ORIGEN_RECETA_INVALIDA, 'faltan' => []];
+        }
+
+        $this->precargarReferencias(array_keys($hojas));
+        $total = 0.0;
+        $faltan = [];
+        foreach ($hojas as $hoja => $cantidad) {
+            $coste = (float)$this->dato((string)$hoja, 'coste', 0.0);
+            if ($coste > 0) {
+                $total += $cantidad * $coste;
+                continue;
             }
+            $faltan[] = (string)$hoja;
         }
 
-        return $this->memo[$key] = ['coste' => 0.0, 'origen' => self::ORIGEN_SIN_COSTE];
+        return $this->memo[$referencia] = [
+            'coste' => round($total, 5),
+            'origen' => empty($faltan) ? self::ORIGEN_RECETA : self::ORIGEN_RECETA_INCOMPLETA,
+            'faltan' => $faltan,
+        ];
+    }
+
+    /**
+     * Grafo de recetas usado en los cálculos (se carga una vez por instancia).
+     */
+    public function grafo(): TpvGrafoRecetas
+    {
+        if (null === $this->grafo) {
+            $this->grafo = TpvGrafoRecetas::cargar();
+        }
+
+        return $this->grafo;
     }
 
     private function cabecera(string $refPlato): array
     {
-        $variante = $this->variante($refPlato);
         return [
             'referencia' => $refPlato,
-            'descripcion' => $this->descripcion($refPlato),
-            'precio' => $variante ? (float)$variante->precio : 0.0,
-            'coste_ficha' => $variante ? (float)$variante->coste : 0.0,
+            'descripcion' => $this->dato($refPlato, 'descripcion', ''),
+            'idproducto' => $this->dato($refPlato, 'idproducto'),
+            'precio' => (float)$this->dato($refPlato, 'precio', 0.0),
+            'coste_ficha' => (float)$this->dato($refPlato, 'coste', 0.0),
+            // margen de la variante: con margen > 0, FS recalcula el precio a partir del coste
+            'margen_ficha' => (float)$this->dato($refPlato, 'margen', 0.0),
             'coste' => 0.0,
             'lineas' => 0,
             'sin_coste' => [],
+            'invalida' => false,
         ];
     }
 
     private function cerrar(array $item): array
     {
+        $item['sin_coste'] = array_values($item['sin_coste']);
+        sort($item['sin_coste'], SORT_STRING);
         $item['coste'] = round($item['coste'], 5);
-        $item['margen'] = round($item['precio'] - $item['coste'], 5);
-        $item['margen_pct'] = $item['precio'] > 0 ? round(100 * $item['margen'] / $item['precio'], 2) : null;
-        $item['coste_pct'] = $item['precio'] > 0 ? round(100 * $item['coste'] / $item['precio'], 2) : null;
+        $item['completo'] = empty($item['sin_coste']) && false === $item['invalida'];
+
+        // sin precio de venta (semielaborados, materias primas) no hay margen que calcular
+        $conPrecio = $item['precio'] > 0;
+        $item['margen'] = $conPrecio ? round($item['precio'] - $item['coste'], 5) : null;
+        $item['margen_pct'] = $conPrecio ? round(100 * $item['margen'] / $item['precio'], 2) : null;
+        $item['coste_pct'] = $conPrecio ? round(100 * $item['coste'] / $item['precio'], 2) : null;
         return $item;
     }
 
-    private function descripcion(string $referencia): string
+    /**
+     * Valor de un campo de la variante (y su producto) de una referencia.
+     */
+    private function dato(string $referencia, string $campo, $defecto = null)
     {
-        $variante = $this->variante($referencia);
-        if (null === $variante) {
-            return '';
-        }
-
-        $idproducto = (int)$variante->idproducto;
-        if (false === isset($this->descripciones[$idproducto])) {
-            $producto = new Producto();
-            $this->descripciones[$idproducto] = $producto->load($idproducto) ? (string)$producto->descripcion : '';
-        }
-
-        return $this->descripciones[$idproducto];
+        $this->precargarReferencias([$referencia]);
+        $fila = TpvCatalogo::fila($this->datos, $referencia);
+        return $fila[$campo] ?? $defecto;
     }
 
-    private function variante(string $referencia): ?Variante
+    /**
+     * Carga en una consulta los datos de todas las referencias de las líneas y de las hojas de
+     * sus subrecetas.
+     *
+     * @param TpvEscandallo[] $lineas
+     */
+    private function precargar(array $lineas): void
     {
-        $key = mb_strtolower($referencia);
-        if (false === array_key_exists($key, $this->variantes)) {
-            $variante = new Variante();
-            $this->variantes[$key] = $variante->loadWhereEq('referencia', $referencia) ? $variante : null;
+        $referencias = [];
+        foreach ($lineas as $linea) {
+            $referencias[] = (string)$linea->ref_plato;
+            $referencias[] = (string)$linea->ref_ingrediente;
+            $hojas = $this->grafo()->hojasPorUnidad((string)$linea->ref_ingrediente) ?? [];
+            foreach (array_keys($hojas) as $hoja) {
+                $referencias[] = (string)$hoja;
+            }
         }
 
-        return $this->variantes[$key];
+        $this->precargarReferencias($referencias);
+    }
+
+    private function precargarReferencias(array $referencias): void
+    {
+        $faltan = [];
+        foreach ($referencias as $referencia) {
+            $clave = TpvCatalogo::clave((string)$referencia);
+            if ($clave !== '' && false === array_key_exists($clave, $this->datos)) {
+                $faltan[] = (string)$referencia;
+                // las que no existan en variantes quedan registradas como inexistentes
+                $this->datos[$clave] = null;
+            }
+        }
+
+        if (empty($faltan)) {
+            return;
+        }
+
+        foreach (TpvCatalogo::variantes($faltan) as $clave => $fila) {
+            $this->datos[$clave] = $fila;
+        }
     }
 }
