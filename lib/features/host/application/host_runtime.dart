@@ -9,7 +9,6 @@ import '../../../core/facturascripts/fs_api_config.dart';
 import '../../../core/facturascripts/fs_http_api.dart';
 import '../../../core/facturascripts/master_data/fs_master_models.dart';
 import '../../../core/fiscal/fs_totales_calculator.dart';
-import '../../../core/isolates/escpos/ticket_documents.dart' show EmpresaTicket;
 import '../../../core/isolates/isolate_runner.dart';
 import '../../../core/logging/app_logger.dart';
 import '../../../core/network/printing/raw_printer_transport.dart';
@@ -17,6 +16,7 @@ import '../../../core/network/tcp/tcp_host_server.dart' show HostServerOptions;
 import '../data/fs_port_adapters.dart';
 import '../data/mysql_port_adapters.dart';
 import '../data/print_queue_adapter.dart';
+import '../domain/empresa_emisora.dart';
 import '../domain/host_settings.dart';
 import '../domain/host_snapshot.dart';
 import '../domain/operational_alert.dart';
@@ -114,15 +114,19 @@ final class HostRuntime {
       catalog: catalog,
       now: clock,
       enrutamiento: settings.impresion.enrutamiento,
-    );
+    )..configurarPases(settings.impresion.pases);
     final outbox = SyncOutbox(store: store, alerts: alerts, now: clock);
+    // La empresa guardada en el diario es la última identidad buena del
+    // emisor: la cabecera de los tickets funciona aunque el ERP no responda.
     final printing = PrintingService(
       alerts: alerts,
       runner: runner,
       settings: settings.impresion,
       nombreTpv: settings.nombreTpv,
+      store: store,
       printer: infra.printerPort,
       empresa: settings.empresa,
+      empresaErp: store.snapshot.empresa,
       now: clock,
     );
     final stock = StockService(
@@ -235,6 +239,12 @@ final class HostRuntime {
   bool _started = false;
   bool _disposed = false;
 
+  /// `idempresa` de los ajustes de FacturaScripts (nulo hasta leerlos).
+  int? _idempresaErp;
+
+  /// El aviso «Sin NIF del emisor» ya se emitió en esta sesión.
+  bool _avisoSinNif = false;
+
   /// Avisos operativos de todos los servicios.
   Stream<OperationalAlert> get alertas => alerts.stream;
 
@@ -283,6 +293,23 @@ final class HostRuntime {
 
   /// Completa cuando termina la puesta a punto lanzada por [start].
   Future<void> get listo => _bootstrap ?? Future<void>.value();
+
+  /// Vuelve a leer la empresa emisora de FacturaScripts (§5.13): la guarda en
+  /// el diario si cambió y la usa desde ya en la cabecera de los tickets.
+  /// Lanza [ConfigException] si no hay ERP configurado o el runtime ya está
+  /// cerrado (antes o durante la lectura) y deja pasar la [ErpApiException]
+  /// del ERP para que la interfaz la muestre.
+  Future<EmpresaEmisora> refrescarEmpresa() async {
+    _comprobarAbierto();
+    final fs = _infra.fs;
+    if (fs == null) {
+      throw const ConfigException(
+        'FacturaScripts no está configurado: no se pueden leer los datos de '
+        'la empresa',
+      );
+    }
+    return _leerEmpresa(fs);
+  }
 
   /// Aplica unos ajustes nuevos en caliente: reconstruye los adaptadores cuya
   /// configuración cambió (ERP, MySQL, impresora), reconfigura los servicios
@@ -334,7 +361,9 @@ final class HostRuntime {
       empresa: nuevos.empresa,
       nombreTpv: nuevos.nombreTpv,
     );
-    sala.configurarEnrutamiento(nuevos.impresion.enrutamiento);
+    sala
+      ..configurarEnrutamiento(nuevos.impresion.enrutamiento)
+      ..configurarPases(nuevos.impresion.pases);
     stock.configurar(
       stock: mysql?.stock,
       recetas: mysql?.recetas,
@@ -396,6 +425,9 @@ final class HostRuntime {
     for (final s in _subscriptions) {
       await s.cancel();
     }
+    // Antes de esperar los efectos en vuelo: una espera de factura del modo
+    // «Emitir factura al cobrar» retendría el cierre hasta su plazo.
+    printing.cancelarEsperas();
     await network.dispose();
     await sala.dispose();
     await printing.idle();
@@ -440,6 +472,52 @@ final class HostRuntime {
     if (db != null) {
       await _bootstrapMysql(db);
     }
+    if (fs != null) _avisarSinNif();
+  }
+
+  /// Lee la empresa emisora del ERP, la guarda en el diario si difiere de la
+  /// guardada (sin contar `obtenidaEn`) y la pasa a la impresión. Lanza
+  /// [ConfigException] si el runtime se cerró mientras se leía.
+  Future<EmpresaEmisora> _leerEmpresa(FsPorts fs) async {
+    final idempresa = _idempresaErp ?? settings.fiscal.idempresa;
+    final leida = EmpresaEmisora.desdeFs(
+      await fs.masterData.empresa(idempresa),
+      _now(),
+    );
+    _comprobarAbierto();
+    // La comparación va dentro de la escritura: decide sobre el diario
+    // vigente al escribir. Si no cambia nada, el store no escribe.
+    await store.update((s) {
+      final guardada = s.empresa;
+      final igual =
+          guardada != null && _identidad(guardada) == _identidad(leida);
+      return igual ? s : s.copyWith(empresa: leida);
+    });
+    printing.configurar(empresaErp: leida);
+    return leida;
+  }
+
+  /// Lanza [ConfigException] si el runtime ya se cerró con [dispose].
+  void _comprobarAbierto() {
+    if (_disposed) {
+      throw const ConfigException(
+        'El TPV está cerrado: no se pueden leer los datos de la empresa',
+      );
+    }
+  }
+
+  static String _identidad(EmpresaEmisora empresa) =>
+      (empresa.toJson()..remove('obtenidaEn')).toString();
+
+  /// Una vez por sesión, al terminar la puesta a punto con el ERP: sin NIF
+  /// del emisor no se pueden imprimir facturas simplificadas.
+  void _avisarSinNif() {
+    if (_disposed || _avisoSinNif || printing.cabeceraFiscalCompleta) return;
+    _avisoSinNif = true;
+    alerts.aviso(
+      'Sin NIF del emisor: no se pueden imprimir facturas simplificadas',
+      origen: 'impresion',
+    );
   }
 
   /// Cada paso es independiente: un fallo (p. ej. `settings` no accesible)
@@ -456,20 +534,8 @@ final class HostRuntime {
         codimpuestoPorDefecto:
             settings.fiscal.codimpuestoPorDefecto ?? ajustes.codimpuesto,
       );
-      if (settings.empresa == null) {
-        final idempresa = ajustes.idempresa ?? settings.fiscal.idempresa;
-        final empresa = await fs.masterData.empresa(idempresa);
-        printing.configurar(
-          empresa: EmpresaTicket(
-            nombre: empresa.nombre,
-            cifnif: empresa.cifnif,
-            direccion: empresa.direccion,
-            codpostal: empresa.codpostal,
-            ciudad: empresa.ciudad,
-            telefono: empresa.telefono1,
-          ),
-        );
-      }
+      _idempresaErp = ajustes.idempresa;
+      if (settings.empresa == null) await _leerEmpresa(fs);
     });
     await _paso('descargar el catálogo', () async {
       await catalog.refrescar();

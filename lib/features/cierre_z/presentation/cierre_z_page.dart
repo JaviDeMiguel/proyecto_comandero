@@ -12,6 +12,7 @@ import '../../host/presentation/widgets/forma_cobro.dart';
 import '../../host/presentation/widgets/host_feedback.dart';
 import '../../host/presentation/widgets/host_formatos.dart';
 import '../../host/presentation/widgets/teclado_importe.dart';
+import '../../host/presentation/widgets/ticket_detalle_dialog.dart';
 import '../../sala/domain/ticket.dart';
 
 Duration? _sinReintentos(int retryCount, Object error) => null;
@@ -189,6 +190,12 @@ class _CierreZPageState extends ConsumerState<CierreZPage> {
                 onPressed: () => unawaited(_retirada()),
                 icon: const Icon(Icons.outbox_outlined),
                 label: const Text('Retirada de efectivo'),
+              ),
+              OutlinedButton.icon(
+                key: const Key('abrir-cajon'),
+                onPressed: () => unawaited(_abrirCajon()),
+                icon: const Icon(Icons.point_of_sale),
+                label: const Text('Abrir cajón'),
               ),
             ],
           ),
@@ -473,6 +480,7 @@ class _CierreZPageState extends ConsumerState<CierreZPage> {
                     ),
                     isThreeLine: t.esMixto,
                     trailing: Text(formatCents(t.totalCents)),
+                    onTap: () => unawaited(mostrarDetalleTicket(context, t)),
                   ),
               ],
             ),
@@ -549,6 +557,15 @@ class _CierreZPageState extends ConsumerState<CierreZPage> {
       exito: 'Retirada de ${formatCents(importe)} registrada',
     );
   }
+
+  /// Apertura manual del cajón (cambio, arqueo): un trabajo propio con el
+  /// pulso en la impresora de tickets, sin registrar nada en el turno. Sin
+  /// impresora de tickets, el error de `PrintingService.abrirCajon` lo dice.
+  Future<void> _abrirCajon() => ejecutarAccion(
+    context,
+    () => ref.read(printingServiceProvider).abrirCajon(),
+    exito: 'Apertura del cajón enviada a la impresora',
+  );
 
   Future<int?> _contar() async {
     final contado = await pedirImporte(

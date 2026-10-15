@@ -13,6 +13,7 @@ import '../../sala/domain/comanda.dart';
 import '../../sala/domain/enrutamiento_comandas.dart';
 import '../../sala/domain/linea_comanda.dart' show DestinoPreparacion;
 import '../../sala/domain/mesa.dart';
+import '../../sala/domain/pases.dart';
 import '../../sala/protocol/sala_messages.dart';
 import '../domain/comandero_cache_repository.dart';
 import '../domain/comandero_config.dart';
@@ -21,8 +22,13 @@ import '../domain/comandero_state.dart';
 import '../domain/pedido_en_edicion.dart';
 import '../domain/traspaso_comandero.dart';
 
+part 'comandero_pases.dart';
+
 final Logger _log = appLogger('comandero.controller');
 const Uuid _uuid = Uuid();
+const SinConexionException _sinHostObjetivo = SinConexionException(
+  'No hay ningún host configurado; conecta antes de enviar',
+);
 
 /// Construye el cliente TCP. Existe para que los tests acorten los
 /// temporizadores o inyecten un `Random` fijo.
@@ -123,8 +129,9 @@ final class ComanderoController {
   /// cada futuro termina sin error.
   final Set<Future<void>> _enviosEnCurso = {};
 
-  /// Anulaciones fiables sin respuesta del host.
+  /// Anulaciones y marchas de pase fiables sin respuesta del host.
   int _anulacionesEnCurso = 0;
+  int _marchasEnCurso = 0;
   Timer? _reintentoSala;
   bool _disposed = false;
 
@@ -189,7 +196,7 @@ final class ComanderoController {
 
   Comanda? comandaDe(String mesaId) => _sala?.comandaDeMesa(mesaId);
 
-  /// Peticiones fiables (comandas, anulaciones) en cola o sin respuesta.
+  /// Peticiones fiables (envíos, anulaciones, marchas) en cola o sin respuesta.
   int get pendientes => _client.pendingReliableCount;
 
   /// Carrito de la mesa (vacío si no se ha añadido nada).
@@ -228,19 +235,8 @@ final class ComanderoController {
   /// Lanza [NetworkException] si no hay red para enviar la sonda.
   Future<List<DiscoveredHost>> buscarHosts({Duration? timeout}) async {
     _checkNotDisposed();
-    final base = _scanOptions ?? const DiscoveryScanOptions();
-    final options = DiscoveryScanOptions(
-      timeout: timeout ?? base.timeout,
-      probes: base.probes,
-      probeInterval: base.probeInterval,
-      targets:
-          base.targets ??
-          (_config.discoveryPort == kDiscoveryPort
-              ? null
-              : await UdpDiscoveryScanner.defaultTargets(
-                  port: _config.discoveryPort,
-                )),
-    );
+    final escaneo = _opcionesEscaneo(timeout: timeout);
+    final options = escaneo is DiscoveryScanOptions ? escaneo : await escaneo;
     final hosts = <DiscoveredHost>[];
     final reflejar = _host == null && _state is! Rechazado;
     if (reflejar) _setState(const Buscando());
@@ -396,7 +392,7 @@ final class ComanderoController {
   /// un fallo de red), espera a que esos envíos terminen, exporta los
   /// carritos y libera los recursos ([dispose]).
   ///
-  /// Las anulaciones en cola no se pueden traspasar: se cuentan en
+  /// Las anulaciones y marchas en cola no se pueden traspasar: se cuentan en
   /// [TraspasoComandero.peticionesPerdidas] para avisar al camarero.
   Future<TraspasoComandero> cerrarParaTraspaso({
     Duration espera = const Duration(seconds: 5),
@@ -406,7 +402,7 @@ final class ComanderoController {
       0,
       (total, pedido) => total + pedido.enEnvio.length,
     );
-    final anulaciones = _anulacionesEnCurso;
+    final perdidas = _anulacionesEnCurso + _marchasEnCurso;
     final envios = List.of(_enviosEnCurso);
     try {
       await desconectar();
@@ -420,7 +416,7 @@ final class ComanderoController {
       return TraspasoComandero(
         pedidos: exportarPedidos(),
         lineasDevueltas: lineasEnEnvio,
-        peticionesPerdidas: anulaciones,
+        peticionesPerdidas: perdidas,
       );
     } finally {
       await dispose();
@@ -431,20 +427,25 @@ final class ComanderoController {
   // Carrito
   // ---------------------------------------------------------------------------
 
-  /// Añade [articulo] al carrito de la mesa (acumula si ya estaba con la
-  /// misma nota). Lanza [ValidationException] si no es vendible o la cantidad
-  /// no es válida.
+  /// Añade [articulo] al carrito de la mesa con el [pase] (`null` = directo);
+  /// acumula si ya estaba con la misma nota y pase. Lanza [ValidationException]
+  /// si no es vendible o la cantidad o el pase no son válidos.
   PedidoEnEdicion anadir(
     String mesaId,
     ArticuloCatalogo articulo, {
     double cantidad = 1,
     String? nota,
+    int? pase,
   }) {
     _checkNotDisposed();
     return _guardarPedido(
-      pedido(
-        mesaId,
-      ).conArticulo(articulo, nuevoId: _newId, cantidad: cantidad, nota: nota),
+      pedido(mesaId).conArticulo(
+        articulo,
+        nuevoId: _newId,
+        cantidad: cantidad,
+        nota: nota,
+        pase: pase,
+      ),
     );
   }
 
@@ -455,6 +456,7 @@ final class ComanderoController {
     String referencia, {
     double cantidad = 1,
     String? nota,
+    int? pase,
   }) {
     final articulo = _catalogo?.porReferencia(referencia);
     if (articulo == null) {
@@ -464,7 +466,7 @@ final class ComanderoController {
             : "La referencia '$referencia' no está en el catálogo",
       );
     }
-    return anadir(mesaId, articulo, cantidad: cantidad, nota: nota);
+    return anadir(mesaId, articulo, cantidad: cantidad, nota: nota, pase: pase);
   }
 
   PedidoEnEdicion cambiarCantidad(
@@ -485,13 +487,14 @@ final class ComanderoController {
     );
   }
 
-  /// Cambia cantidad y nota de una línea en una sola edición (ver
-  /// [PedidoEnEdicion.conCantidadYNota]).
+  /// Cambia cantidad, nota y, si se pasa [pase], el pase de una línea en una
+  /// sola edición (ver [PedidoEnEdicion.conCantidadYNota]).
   PedidoEnEdicion editarLinea(
     String mesaId,
     String lineaId, {
     required double cantidad,
     required String? nota,
+    int? Function()? pase,
   }) {
     _checkNotDisposed();
     return _guardarPedido(
@@ -499,6 +502,7 @@ final class ComanderoController {
         lineaId,
         cantidad: cantidad,
         nota: nota,
+        pase: pase,
         nuevoId: _newId,
       ),
     );
@@ -552,9 +556,8 @@ final class ComanderoController {
   /// o se llama a [desconectar]/[dispose] ([NetworkException]) vuelven a ser
   /// editables.
   ///
-  /// Lanza [ValidationException] si no hay nada que enviar y
-  /// [SinConexionException] si no hay ningún host objetivo (ni conectado ni
-  /// reconectando).
+  /// Lanza [ValidationException] si no hay nada que enviar, y
+  /// [SinConexionException] sin host objetivo (ni conectado ni reconectando).
   Future<ComandaSubmitResult> enviar(
     String mesaId, {
     String? camarero,
@@ -670,6 +673,10 @@ final class ComanderoController {
           distintas.add(linea.id);
         }
       }
+      _log.warning(
+        'Mesa $mesaId: el host ya tenía ${result.lineasDuplicadas} línea(s) '
+        'del envío (${distintas.length} distinta(s))',
+      );
     }
     for (final linea in enviadas) {
       final anterior = linea.reemplazaA;
@@ -677,16 +684,9 @@ final class ComanderoController {
         reemplazadas.add(anterior);
       }
     }
-    if (result.lineasDuplicadas > 0) {
-      _log.warning(
-        'Mesa $mesaId: el host ya tenía ${result.lineasDuplicadas} línea(s) '
-        'del envío (${distintas.length} distinta(s))',
-      );
-    }
     if (distintas.isEmpty && reemplazadas.isEmpty) return;
     const distintasTexto =
-        'línea(s) con otra cantidad o nota, y conserva '
-        'la suya';
+        'línea(s) con otra cantidad o nota, y conserva la suya';
     const reemplazadasTexto =
         'línea(s) editada(s) tras un corte ya habían '
         'llegado al host: pueden estar duplicadas';
@@ -763,9 +763,7 @@ final class ComanderoController {
   /// Vuelve a pedir el snapshot de sala (p. ej. "tirar para refrescar").
   Future<void> refrescarSala() async {
     _checkNotDisposed();
-    if (_client.state is! Connected) {
-      throw const SinConexionException();
-    }
+    if (_client.state is! Connected) throw const SinConexionException();
     final ack = await _request(SalaMessageTypes.salaSnapshotGet, const {});
     _sala = _parse(
       () => SalaSnapshot.fromJson(ack.payload),
@@ -986,9 +984,7 @@ final class ComanderoController {
         ? reintentoCatalogoMax
         : espera;
     _fallosCatalogo++;
-    _log.info(
-      'Reintento de carga del catálogo en ${limitada.inMilliseconds} ms',
-    );
+    _log.info('Reintento del catálogo en ${limitada.inMilliseconds} ms');
     _reintentoCatalogo = Timer(limitada, () {
       _reintentoCatalogo = null;
       if (!_vigente(sesion)) return;
@@ -1024,7 +1020,8 @@ final class ComanderoController {
   /// Vuelve a pedir el snapshot de sala dentro de la sesión [sesion] (sin
   /// lanzar: los fallos se registran y se reintenta unas pocas veces). Lo
   /// usan `catalogo.changed` y `enrutamiento.changed` para que el
-  /// enrutamiento efectivo del host esté al día.
+  /// enrutamiento efectivo del host esté al día, y `fijarComensales` si la
+  /// comanda que veía ya se cerró.
   Future<void> _refrescarSalaEnSesion(int sesion, String motivo) async {
     for (var intento = 1; intento <= _intentosRefrescoSala; intento++) {
       if (!_vigente(sesion)) return;
@@ -1096,19 +1093,7 @@ final class ComanderoController {
   Future<HostEndpoint?> _rediscover() async {
     final hostId = _host?.hostId;
     if (hostId == null || _disposed) return null;
-    final base = _scanOptions ?? const DiscoveryScanOptions();
-    final options = DiscoveryScanOptions(
-      timeout: base.timeout,
-      probes: base.probes,
-      probeInterval: base.probeInterval,
-      targets:
-          base.targets ??
-          (_config.discoveryPort == kDiscoveryPort
-              ? null
-              : await UdpDiscoveryScanner.defaultTargets(
-                  port: _config.discoveryPort,
-                )),
-    );
+    final options = await _opcionesEscaneo();
     try {
       await for (final host in _scanner.discover(options)) {
         if (host.hostId == hostId) {
@@ -1121,6 +1106,25 @@ final class ComanderoController {
     return null;
   }
 
+  /// Opciones del escaneo UDP: las inyectadas (tests) o las del puerto de
+  /// descubrimiento configurado; [timeout] sustituye al de la base. Solo es
+  /// asíncrono si hay que calcular destinos (así [Buscando] sale sin esperar).
+  FutureOr<DiscoveryScanOptions> _opcionesEscaneo({Duration? timeout}) {
+    final base = _scanOptions ?? const DiscoveryScanOptions();
+    DiscoveryScanOptions con(List<DiscoveryTarget>? targets) =>
+        DiscoveryScanOptions(
+          timeout: timeout ?? base.timeout,
+          probes: base.probes,
+          probeInterval: base.probeInterval,
+          targets: targets,
+        );
+    if (base.targets != null || _config.discoveryPort == kDiscoveryPort) {
+      return con(base.targets);
+    }
+    final puerto = _config.discoveryPort;
+    return UdpDiscoveryScanner.defaultTargets(port: puerto).then(con);
+  }
+
   // ---------------------------------------------------------------------------
   // Utilidades
   // ---------------------------------------------------------------------------
@@ -1130,18 +1134,12 @@ final class ComanderoController {
     Map<String, Object?> payload, {
     String? mesaId,
   }) async {
-    if (_host == null) {
-      // Sin host objetivo la cola fiable no saldría nunca: mejor avisar.
-      throw const SinConexionException(
-        'No hay ningún host configurado; conecta antes de enviar',
-      );
-    }
-    final future = _client.request(type, payload, reliable: true);
+    // Sin host objetivo la cola fiable no saldría nunca: mejor avisar.
+    if (_host == null) throw _sinHostObjetivo;
+    final future = _request(type, payload, mesaId: mesaId, reliable: true);
     _emitirPendientes();
     try {
       return await future;
-    } on RemoteRequestException catch (error) {
-      throw ComanderoSalaException.desde(error, mesaId: mesaId);
     } finally {
       _emitirPendientes();
     }
@@ -1151,9 +1149,10 @@ final class ComanderoController {
     String type,
     Map<String, Object?> payload, {
     String? mesaId,
+    bool reliable = false,
   }) async {
     try {
-      return await _client.request(type, payload);
+      return await _client.request(type, payload, reliable: reliable);
     } on RemoteRequestException catch (error) {
       throw ComanderoSalaException.desde(error, mesaId: mesaId);
     }

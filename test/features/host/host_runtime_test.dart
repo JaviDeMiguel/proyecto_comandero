@@ -4,9 +4,12 @@ import 'dart:math';
 
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:proyecto_comandero/core/errors/app_exception.dart';
 import 'package:proyecto_comandero/core/facturascripts/fs_api.dart';
 import 'package:proyecto_comandero/core/facturascripts/fs_api_config.dart';
 import 'package:proyecto_comandero/core/facturascripts/fs_http_api.dart';
+import 'package:proyecto_comandero/core/isolates/escpos/ticket_documents.dart'
+    show EmpresaTicket;
 import 'package:proyecto_comandero/core/isolates/isolate_runner.dart';
 import 'package:proyecto_comandero/core/network/printing/raw_printer_transport.dart';
 import 'package:proyecto_comandero/core/network/tcp/tcp_comandero_client.dart';
@@ -17,14 +20,17 @@ import 'package:proyecto_comandero/features/host/data/in_memory_host_state_repos
 import 'package:proyecto_comandero/features/host/domain/host_settings.dart';
 import 'package:proyecto_comandero/features/host/domain/host_snapshot.dart';
 import 'package:proyecto_comandero/features/host/domain/sync_job.dart';
+import 'package:proyecto_comandero/features/impresion/domain/formato_impresion.dart';
 import 'package:proyecto_comandero/features/sala/domain/enrutamiento_comandas.dart';
 import 'package:proyecto_comandero/features/sala/domain/linea_comanda.dart';
 import 'package:proyecto_comandero/features/sala/domain/mesa.dart';
+import 'package:proyecto_comandero/features/sala/domain/pases.dart';
 import 'package:proyecto_comandero/features/sala/domain/ticket.dart';
 import 'package:proyecto_comandero/features/sala/protocol/sala_messages.dart';
 import 'package:test/test.dart';
 
 import '../../core/facturascripts/fake_fs_api.dart';
+import '../../core/isolates/escpos/escpos_decoder.dart';
 import '../../core/network/tcp/test_support.dart';
 import 'fakes/fake_ports.dart';
 import 'support/host_test_support.dart';
@@ -57,6 +63,41 @@ final class ApiConCatalogo extends FakeFsApiDelegate {
     );
   }
 }
+
+/// Además del catálogo, los ajustes `settings/default` de FacturaScripts (con
+/// `idempresa` 1), para que la puesta a punto lea la empresa emisora.
+final class ApiConEmpresa extends ApiConCatalogo {
+  ApiConEmpresa(super.inner);
+
+  @override
+  Future<FsRecord?> get(String resource, Object id) {
+    if (resource == 'settings' && id == 'default') {
+      return Future.value({
+        'name': 'default',
+        'properties': {'idempresa': 1},
+      });
+    }
+    return super.get(resource, id);
+  }
+}
+
+/// Empresa 1 de FacturaScripts, con o sin NIF.
+FsRecord empresaFs({String? cifnif = 'B12345678'}) => {
+  'idempresa': 1,
+  'nombre': 'Hostelería Manolo SL',
+  'nombrecorto': 'Bar Manolo',
+  'cifnif': ?cifnif,
+  'ciudad': 'Toledo',
+};
+
+/// Ajustes con impresora de tickets y el [formato] dado.
+HostSettings conFormato(HostSettings base, FormatoImpresion formato) =>
+    base.copyWith(
+      impresion: ImpresionSettings(
+        tickets: PrinterEndpoint('10.0.0.12'),
+        formato: formato,
+      ),
+    );
 
 HostSettings settingsBase({bool conErp = false}) => HostSettings(
   deviceId: 'tablet-1',
@@ -99,15 +140,20 @@ void main() {
     runtimes.clear();
   });
 
+  /// Con [conEmpresa], el ERP también sirve `settings/default` (y la empresa
+  /// que se haya sembrado en `empresas`).
   Future<HostRuntime> arrancar(
     HostSettings settings, {
     FakeFsApi? api,
     FakePrinterPort? printer,
+    bool conEmpresa = false,
   }) async {
     final runtime = await HostRuntime.create(
       settings: settings,
       stateRepo: repo,
-      api: api == null ? null : ApiConCatalogo(api),
+      api: api == null
+          ? null
+          : (conEmpresa ? ApiConEmpresa(api) : ApiConCatalogo(api)),
       printerPort: printer ?? FakePrinterPort(),
       runner: const InlineIsolateRunner(),
       now: clock.call,
@@ -176,7 +222,7 @@ void main() {
       await runtime.outbox.idle();
       await runtime.printing.idle();
       expect(ticket.totalCents, 665);
-      expect(printer.jobs.single.description, 'Ticket 1');
+      expect(printer.jobs.single.description, 'Ticket 1 · provisional');
       // La factura queda en la cola, en pausa por falta de ERP.
       expect(runtime.outbox.pausada, isTrue);
       expect(runtime.outbox.estado.bloqueados, 1);
@@ -521,6 +567,216 @@ void main() {
     // Ni `listo` falla ni queda un error sin capturar en la zona del test.
     await runtime.listo;
     await Future<void>.delayed(const Duration(milliseconds: 20));
+  });
+
+  group('impresión (§5.13 y §5.19)', () {
+    Iterable<String> avisosSinNif(HostRuntime runtime) => runtime
+        .alerts
+        .recientes
+        .map((a) => a.titulo)
+        .where((t) => t.startsWith('Sin NIF del emisor'));
+
+    Future<Ticket> cobrarCana(
+      HostRuntime runtime, {
+      MetodoPago metodo = MetodoPago.tarjeta,
+    }) async {
+      await runtime.sala.aceptarLineas(submit('m1', [linea('l1', 'CANA', 1)]));
+      final ticket = await runtime.sala.cobrar(
+        'm1',
+        metodo,
+        entregadoCents: metodo == MetodoPago.efectivo ? 100 : null,
+      );
+      await runtime.sala.idle();
+      await runtime.printing.idle();
+      return ticket;
+    }
+
+    test('la empresa del ERP se guarda en la puesta a punto y se usa tras '
+        'reiniciar sin ERP', () async {
+      final api = FakeFsApi.conDatosBasicos()..seed('empresas', empresaFs());
+      final primero = await arrancar(
+        settingsBase(conErp: true),
+        api: api,
+        conEmpresa: true,
+      );
+      final empresa = primero.store.snapshot.empresa!;
+      expect(empresa.nombre, 'Hostelería Manolo SL');
+      expect(empresa.cifnif, 'B12345678');
+      expect(empresa.obtenidaEn, clock.now);
+      expect(primero.printing.cabeceraFiscalCompleta, isTrue);
+      expect(avisosSinNif(primero), isEmpty);
+      await primero.dispose();
+      runtimes.remove(primero);
+
+      final printer = FakePrinterPort();
+      final segundo = await arrancar(settingsBase(), printer: printer);
+      expect(segundo.erpConfigurado, isFalse);
+      expect(segundo.printing.cabeceraFiscalCompleta, isTrue);
+      await cobrarCana(segundo);
+      final texto = decodeEscPos(printer.jobs.single.bytes).texts.join('|');
+      expect(texto, contains('Hostelería Manolo SL'));
+      expect(texto, contains('B12345678'));
+      expect(texto, contains('Toledo'));
+      await expectLater(
+        segundo.refrescarEmpresa(),
+        throwsA(isA<ConfigException>()),
+      );
+    });
+
+    test('sin NIF avisa una vez; refrescarEmpresa vuelve a leerla y solo la '
+        'guarda si cambió', () async {
+      final api = FakeFsApi.conDatosBasicos()
+        ..seed('empresas', empresaFs(cifnif: null));
+      final runtime = await arrancar(
+        settingsBase(conErp: true),
+        api: api,
+        conEmpresa: true,
+      );
+      expect(runtime.printing.cabeceraFiscalCompleta, isFalse);
+      expect(avisosSinNif(runtime), hasLength(1));
+
+      api.find('empresas', 1)!['cifnif'] = 'B12345678';
+      clock.advance(const Duration(hours: 1));
+      final leida = await runtime.refrescarEmpresa();
+      expect(leida.cifnif, 'B12345678');
+      expect(runtime.store.snapshot.empresa, leida);
+      expect(runtime.printing.cabeceraFiscalCompleta, isTrue);
+
+      // La misma identidad: el diario no se reescribe.
+      clock.advance(const Duration(hours: 1));
+      await runtime.refrescarEmpresa();
+      expect(runtime.store.snapshot.empresa, same(leida));
+
+      // Un ERP que falla deja pasar su error.
+      api.table('empresas').clear();
+      await expectLater(
+        runtime.refrescarEmpresa(),
+        throwsA(isA<ErpApiException>()),
+      );
+    });
+
+    test('tras dispose, refrescarEmpresa lanza ConfigException sin llamar al '
+        'ERP', () async {
+      final api = FakeFsApi.conDatosBasicos()..seed('empresas', empresaFs());
+      final runtime = await arrancar(
+        settingsBase(conErp: true),
+        api: api,
+        conEmpresa: true,
+      );
+      final llamadas = api.callsTo('empresas').length;
+      await runtime.dispose();
+      await expectLater(
+        runtime.refrescarEmpresa(),
+        throwsA(isA<ConfigException>()),
+      );
+      expect(api.callsTo('empresas'), hasLength(llamadas));
+    });
+
+    test('el aviso «Sin NIF del emisor» no se repite al rehacer la puesta a '
+        'punto', () async {
+      final api = FakeFsApi.conDatosBasicos()
+        ..seed('empresas', empresaFs(cifnif: null));
+      final runtime = await crearConFactoria(
+        settingsBase(conErp: true),
+        (_) => ApiConEmpresa(api),
+      );
+      await runtime.start();
+      await runtime.listo;
+      expect(avisosSinNif(runtime), hasLength(1));
+
+      await runtime.applySettings(
+        runtime.settings.copyWith(
+          erp: FsApiConfig(baseUrl: 'http://otro.local/fs', token: 'otro'),
+        ),
+      );
+      await runtime.listo;
+      expect(api.callsTo('empresas'), hasLength(2));
+      expect(avisosSinNif(runtime), hasLength(1));
+    });
+
+    test('los pases llegan al snapshot de sala y un cambio de formato se '
+        'aplica a la impresión', () async {
+      const pases = PasesConfig(nombres: ['Bebidas', 'Entrantes', 'Postres']);
+      final printer = FakePrinterPort();
+      final runtime = await arrancar(
+        conFormato(settingsBase(), const FormatoImpresion(pases: pases)),
+        printer: printer,
+      );
+      expect(runtime.sala.pases, pases);
+      expect(runtime.sala.snapshot().pases, pases);
+
+      await runtime.applySettings(
+        conFormato(
+          runtime.settings,
+          const FormatoImpresion(
+            pases: PasesConfig(activos: false),
+            ticket: FormatoTicket(pie: 'Gracias por su visita'),
+          ),
+        ),
+      );
+      expect(runtime.sala.snapshot().pases?.activos, isFalse);
+      await cobrarCana(runtime);
+      final texto = decodeEscPos(printer.jobs.single.bytes).texts.join('|');
+      expect(texto, contains('Gracias por su visita'));
+    });
+
+    test('art. 14 tras un reinicio: se recuerda el ORIGINAL y la siguiente '
+        'impresión es un DUPLICADO', () async {
+      final settings = settingsBase().copyWith(
+        empresa: const EmpresaTicket(nombre: 'Bar Manolo', cifnif: 'B12345678'),
+      );
+      final printer = FakePrinterPort();
+      final primero = await arrancar(settings, printer: printer);
+      final ticket = await cobrarCana(primero);
+      await primero.store.update(
+        (s) => s.conTicket(
+          s
+              .ticketPorId(ticket.id)!
+              .conFactura(
+                FacturaSincronizada(
+                  estado: EstadoSincronizacion.sincronizado,
+                  codigo: 'F2026S9',
+                  fecha: clock.now,
+                  totalFsCents: ticket.totalCents,
+                ),
+              ),
+        ),
+      );
+      await primero.printing.imprimirFactura(ticket.id);
+      await primero.printing.idle();
+      expect(printer.jobs.last.description, 'Factura F2026S9 (original)');
+      await primero.dispose();
+      runtimes.remove(primero);
+
+      final otra = FakePrinterPort();
+      final segundo = await arrancar(settings, printer: otra);
+      await segundo.printing.imprimirFactura(ticket.id);
+      await segundo.printing.idle();
+      expect(otra.jobs.single.description, 'Factura F2026S9 (duplicado 1)');
+    });
+
+    test('dispose con una espera de factura en curso termina '
+        'enseguida', () async {
+      final runtime = await arrancar(
+        conFormato(
+          settingsBase(),
+          const FormatoImpresion(
+            emision: EmisionTicket(
+              modo: ModoEmision.facturaAlCobrar,
+              esperaSegundos: 30,
+            ),
+          ),
+        ),
+      );
+      await runtime.sala.aceptarLineas(submit('m1', [linea('l1', 'CANA', 1)]));
+      final ticket = await runtime.sala.cobrar('m1', MetodoPago.tarjeta);
+      expect(runtime.printing.emisionPendiente(ticket.id), isTrue);
+
+      final reloj = Stopwatch()..start();
+      await runtime.dispose().timeout(const Duration(seconds: 10));
+      runtimes.remove(runtime);
+      expect(reloj.elapsed, lessThan(const Duration(seconds: 5)));
+    });
   });
 }
 

@@ -114,7 +114,9 @@ final class PrinterTransportOptions {
 /// genera comandos ESC/POS.
 abstract interface class RawPrinterTransport {
   /// Entrega [bytes] a la impresora de [endpoint]. Completa cuando el trabajo
-  /// se ha entregado; falla con [PrinterException] en cualquier otro caso.
+  /// se ha entregado; falla con [PrinterConnectException] si no se llegó a
+  /// conectar (no salió ningún byte) y con [PrinterException] en cualquier
+  /// otro caso (escritura o cierre: parte del trabajo pudo haber salido).
   ///
   /// [bytes] no se copia: no debe modificarse hasta que el `Future` complete.
   Future<void> send(PrinterEndpoint endpoint, Uint8List bytes);
@@ -142,7 +144,9 @@ typedef SocketConnector = Future<Socket> Function(
 /// no permite saber si el papel salió; un fallo, a la inversa, no garantiza
 /// que no se imprimiera nada (el corte pudo llegar a mitad de ticket), de modo
 /// que reintentar puede duplicar parte de un ticket. En cocina eso es
-/// preferible a perder una comanda.
+/// preferible a perder una comanda. La única excepción segura es el fallo al
+/// conectar ([PrinterConnectException]): no salió ningún byte, y es lo único
+/// que `PrintQueue` reintenta para una factura.
 final class EscPosSocketPrinter implements RawPrinterTransport {
   EscPosSocketPrinter({
     this.options = const PrinterTransportOptions(),
@@ -199,9 +203,12 @@ final class EscPosSocketPrinter implements RawPrinterTransport {
         },
       );
     } on TimeoutException catch (error) {
-      throw PrinterException(_connectTimeoutMessage(endpoint), cause: error);
+      throw PrinterConnectException(
+        _connectTimeoutMessage(endpoint),
+        cause: error,
+      );
     } on SocketException catch (error) {
-      throw PrinterException(
+      throw PrinterConnectException(
         _looksLikeTimeout(error)
             ? _connectTimeoutMessage(endpoint)
             : 'No se pudo conectar con la impresora $endpoint: '
@@ -209,7 +216,7 @@ final class EscPosSocketPrinter implements RawPrinterTransport {
         cause: error,
       );
     } on Object catch (error) {
-      throw PrinterException(
+      throw PrinterConnectException(
         'No se pudo conectar con la impresora $endpoint: ${_reason(error)}',
         cause: error,
       );

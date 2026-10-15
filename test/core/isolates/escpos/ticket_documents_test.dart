@@ -132,6 +132,30 @@ KitchenOrderPrintData comanda({PaperWidth paper = PaperWidth.mm80}) =>
       paper: paper,
     );
 
+MarcharPrintData marchar({PaperWidth paper = PaperWidth.mm80}) =>
+    MarcharPrintData(
+      titulo: 'COCINA',
+      mesa: '7',
+      zona: 'Terraza',
+      pase: 2,
+      nombrePase: 'Segundos',
+      numerosComanda: const [12],
+      pedidaEn: DateTime(2026, 3, 5, 21, 14),
+      fechaHora: DateTime(2026, 3, 5, 21, 52),
+      camarero: 'Ana',
+      comensales: 4,
+      lineas: const [
+        LineaComandaPrint(
+          cantidad: 2,
+          descripcion: 'Entrecot a la brasa',
+          nota: '1 poco hecho, 1 al punto',
+          pase: 2,
+        ),
+        LineaComandaPrint(cantidad: 1, descripcion: 'Lubina a la sal', pase: 2),
+      ],
+      paper: paper,
+    );
+
 ZReportPrintData informeZ({
   List<PartidaZPrint> partidas = const [],
   PaperWidth paper = PaperWidth.mm80,
@@ -176,17 +200,6 @@ const partidasDescuadre = <PartidaZPrint>[
   ),
 ];
 
-void expectWidthsWithin(DecodedStream decoded, PaperWidth paper) {
-  for (final line in decoded.lines) {
-    final max = line.doubleWidth ? paper.columns ~/ 2 : paper.columns;
-    expect(
-      line.text.runes.length,
-      lessThanOrEqualTo(max),
-      reason: 'línea demasiado larga: $line',
-    );
-  }
-}
-
 PrecuentaPrintData precuenta({int? comensales = 3, String mesa = '12'}) =>
     PrecuentaPrintData(
       empresa: empresaCompleta,
@@ -201,6 +214,33 @@ PrecuentaPrintData precuenta({int? comensales = 3, String mesa = '12'}) =>
 
 void main() {
   group('generarPrecuenta', () {
+    test('la cabecera imprime el sitio web, recortado, en su propia línea '
+        'tras el teléfono; en blanco no imprime nada', () {
+      PrecuentaPrintData conWeb(String? web) => PrecuentaPrintData(
+        empresa: EmpresaTicket(
+          nombre: 'Bar Pepe',
+          telefono: '926 123 456',
+          web: web,
+        ),
+        fechaHora: fecha,
+        mesa: '1',
+        lineas: ticketMinimo().lineas,
+        desglose: const [],
+        totalCents: 180,
+      );
+      final conSitio = decodeEscPos(
+        generarPrecuenta(conWeb(' www.barpepe.es ')),
+      ).texts;
+      final telefono = conSitio.indexOf('Tel.: 926 123 456');
+      expect(telefono, greaterThan(0));
+      expect(conSitio[telefono + 1], 'www.barpepe.es');
+      for (final web in [null, '', '   ']) {
+        final texts = decodeEscPos(generarPrecuenta(conWeb(web))).texts;
+        expect(texts, isNot(contains('www.barpepe.es')));
+        expect(texts[texts.indexOf('Tel.: 926 123 456') + 1], '-' * 48);
+      }
+    });
+
     test('cuenta provisional: sin datos fiscales, sin pago y sin cajón', () {
       final decoded = decodeEscPos(generarPrecuenta(precuenta()));
       final texts = decoded.texts;
@@ -210,10 +250,16 @@ void main() {
       final titulo = decoded.lines.firstWhere((l) => l.text == 'PRECUENTA');
       expect(titulo.bold, isTrue);
       expect(titulo.align, 1);
-      expect(texts, contains('05/03/2026 21:07'));
+      expect(texts, contains('NO VÁLIDO COMO FACTURA'));
+      // «Mesa 12» (sin el «Mesa:» de antes) con los comensales a la derecha;
+      // debajo, el camarero con la fecha y la hora.
       expect(
-        texts.firstWhere((t) => t.startsWith('Mesa: 12')),
-        endsWith('Camarero: Ana'),
+        texts.firstWhere((t) => t.startsWith('Mesa 12')),
+        endsWith('3 comensales'),
+      );
+      expect(
+        texts.firstWhere((t) => t.startsWith('Camarero: Ana')),
+        endsWith('05/03/2026 21:07'),
       );
       expect(
         texts.firstWhere((t) => t.startsWith('2 x Café con leche')),
@@ -240,12 +286,13 @@ void main() {
       for (final prohibido in [
         'TICKET',
         'FACTURA SIMPLIFICADA',
-        'Factura:',
+        'Nº ',
         'Pendiente de facturar',
-        'Ref.:',
+        'Ref.',
         'Forma de pago',
         'Entregado',
         'Cambio',
+        'QR tributario',
       ]) {
         expect(
           texts.where((t) => t.startsWith(prohibido)),
@@ -322,20 +369,23 @@ void main() {
       );
       expect(nombre.align, 1);
       expect(nombre.bold, isTrue);
-      expect(texts, contains('CIF/NIF: B12345678'));
+      expect(texts, contains('NIF: B12345678'));
+      expect(texts, isNot(contains('CIF/NIF: B12345678')));
       expect(texts, contains('Calle Mayor, 12'));
       expect(texts, contains('13001 Ciudad Real'));
       expect(texts, contains('Tel.: 926 123 456'));
 
-      // Título y código de factura.
+      // Título y código de factura: «Nº <código>» y «Ref. <numero2>».
       expect(texts, contains('FACTURA SIMPLIFICADA'));
-      expect(texts, contains('Factura: FS2026-00123'));
+      expect(texts, contains('Nº FS2026-00123'));
+      expect(texts, isNot(contains('Factura: FS2026-00123')));
       expect(texts, isNot(contains('Pendiente de facturar')));
-      expect(texts, contains('Ref.: TPV-ab12-9f3e'));
+      expect(texts, contains('Ref. TPV-ab12-9f3e'));
+      expect(texts, isNot(contains('Ref.: TPV-ab12-9f3e')));
       expect(texts, contains('05/03/2026 21:07'));
 
-      // Mesa y camarero en la misma fila.
-      final mesaLine = texts.firstWhere((t) => t.startsWith('Mesa: 12'));
+      // Mesa (sin el «Mesa:» de antes) y camarero en la misma fila.
+      final mesaLine = texts.firstWhere((t) => t.startsWith('Mesa 12'));
       expect(mesaLine, endsWith('Camarero: Ana'));
       expect(mesaLine.length, 48);
 
@@ -385,9 +435,17 @@ void main() {
       expect(copia.align, 1);
       expect(texts, contains('IVA incluido. Gracias por su visita.'));
 
-      // Final: avance, corte y cajón en ese orden.
-      final tail = decoded.commands.sublist(decoded.commands.length - 3);
-      expect(tail.map((c) => c.name), ['feed', 'cut', 'drawer']);
+      // El cajón va justo después del init (init, codepage, charset, cajón),
+      // para abrirse en cuanto empieza el trabajo; al final, avance y corte.
+      expect(decoded.commands.take(4).map((c) => c.name), [
+        'init',
+        'codepage',
+        'charset',
+        'drawer',
+      ]);
+      expect(decoded.named('drawer'), hasLength(1));
+      final tail = decoded.commands.sublist(decoded.commands.length - 2);
+      expect(tail.map((c) => c.name), ['feed', 'cut']);
       expect(tail[1].args, [66, 3]);
     });
 
@@ -440,7 +498,9 @@ void main() {
       );
       final raster = decoded.named('raster').single;
       expect(raster.args, [0, 48, 77]); // 384 puntos; 100 × 384 / 500 = 76,8
-      expect(decoded.commands.indexOf(raster), 2); // tras init y codepage
+      // Tras init, codepage, charset y el pulso del cajón.
+      expect(decoded.commands.indexOf(raster), 4);
+      expect(decoded.commands[3].name, 'drawer');
     });
 
     test('es determinista', () {
@@ -540,18 +600,31 @@ void main() {
       final texts = decoded.texts;
       expectWidthsWithin(decoded, PaperWidth.mm80);
 
+      // El título del puesto es la primera línea, en doble alto y ancho,
+      // centrado por la impresora y sin relleno.
       final titulo = decoded.lines.firstWhere((l) => l.text == 'COCINA');
+      expect(titulo, same(decoded.lines.first));
       expect(titulo.bold, isTrue);
       expect(titulo.doubleHeight, isTrue);
+      expect(titulo.doubleWidth, isTrue);
       expect(titulo.align, 1);
 
-      final mesa = decoded.lines.firstWhere((l) => l.text == 'MESA 7');
+      // La mesa tal cual: «Mesa 7», sin el prefijo «MESA».
+      final mesa = decoded.lines.firstWhere((l) => l.text == 'Mesa 7');
       expect(mesa.doubleHeight, isTrue);
       expect(mesa.doubleWidth, isTrue);
       expect(mesa.bold, isTrue);
+      expect(texts, isNot(contains('MESA 7')));
 
-      expect(texts, contains('Comanda C-0042'));
-      expect(texts, contains('05/03/2026 21:07'));
+      // «COMANDA Nº n · hh:mm» sustituye a «Comanda n» y a la línea de fecha.
+      final envio = decoded.lines.firstWhere(
+        (l) => l.text == 'COMANDA Nº C-0042 · 21:07',
+      );
+      expect(envio.bold, isTrue);
+      expect(envio.doubleHeight, isTrue);
+      expect(texts, isNot(contains('Comanda C-0042')));
+      expect(texts, isNot(contains('05/03/2026 21:07')));
+      // Sin comensales, el camarero sigue en su propia línea.
       expect(texts, contains('Camarero: Luis'));
 
       final entrecot = decoded.lines.firstWhere(
@@ -561,15 +634,21 @@ void main() {
       expect(entrecot.doubleWidth, isFalse);
       expect(entrecot.bold, isTrue);
 
+      // La nota: el prefijo sin inverso y el texto en inverso.
       final nota = decoded.lines.firstWhere(
         (l) => l.text == '   > sin atún, aliño aparte',
       );
       expect(nota.doubleHeight, isTrue);
+      expect(nota.runs.map((r) => r.inverse), [false, true]);
 
-      final anuladaIdx = texts.indexOf('** ANULADA **');
-      expect(anuladaIdx, isNonNegative);
-      expect(texts[anuladaIdx + 1], '1 x Sopa castellana');
-      expect(decoded.lines[anuladaIdx].bold, isTrue);
+      // La línea anulada va con la cantidad en negativo (decisión D.1).
+      expect(texts, isNot(contains('** ANULADA **')));
+      final anulada = decoded.lines.firstWhere(
+        (l) => l.text == '-1 x Sopa castellana',
+      );
+      expect(anulada.bold, isTrue);
+      expect(anulada.doubleHeight, isTrue);
+      expect(texts, isNot(contains('1 x Sopa castellana')));
 
       final obsIdx = texts.indexOf('OBSERVACIONES:');
       expect(obsIdx, isNonNegative);
@@ -591,7 +670,10 @@ void main() {
       );
       final decoded = decodeEscPos(generarComandaCocina(data));
       expectWidthsWithin(decoded, PaperWidth.mm58);
-      expect(decoded.texts, contains('MESA Terraza 3'));
+      expect(decoded.texts, contains('Terraza 3'));
+      expect(decoded.texts, isNot(contains('MESA Terraza 3')));
+      // Sin número de envío: «COMANDA · hh:mm», que no empieza por «Comanda».
+      expect(decoded.texts, contains('COMANDA · 21:07'));
       expect(decoded.texts.where((t) => t.startsWith('Comanda')), isEmpty);
       expect(decoded.texts.where((t) => t.startsWith('Camarero')), isEmpty);
       expect(decoded.texts, isNot(contains('OBSERVACIONES:')));
@@ -608,12 +690,15 @@ void main() {
         paper: PaperWidth.mm58,
       );
       final decoded = decodeEscPos(generarComandaCocina(data));
-      final mesaLines = decoded.lines.where((l) => l.doubleWidth).toList();
+      // El título también va en doble ancho: se excluye del filtro.
+      final mesaLines = decoded.lines
+          .where((l) => l.doubleWidth && l.text != 'COCINA')
+          .toList();
       expect(mesaLines.length, greaterThan(1));
       for (final l in mesaLines) {
         expect(l.text.runes.length, lessThanOrEqualTo(16));
       }
-      expect(mesaLines.first.text, 'MESA Comedor');
+      expect(mesaLines.first.text, 'Comedor');
     });
 
     test('es determinista', () {
@@ -865,6 +950,47 @@ void main() {
   });
 
   group('DTOs', () {
+    test('igualdad por valor de la precuenta y de los modelos comunes con '
+        'instancias no const (sin canonicalizar, Equatable compara los '
+        'props)', () {
+      expect(precuenta(), precuenta());
+      expect(precuenta().hashCode, precuenta().hashCode);
+      expect(precuenta(), isNot(precuenta(mesa: '3')));
+      expect(precuenta(), isNot(precuenta(comensales: null)));
+
+      LineaTicket linea({String? letraIva = 'A'}) => LineaTicket(
+        descripcion: 'Caña',
+        cantidad: 1,
+        pvpUnitarioCents: 180,
+        importeCents: 180,
+        nota: 'sin espuma',
+        letraIva: letraIva,
+      );
+      expect(linea(), linea());
+      expect(linea().hashCode, linea().hashCode);
+      expect(linea(), isNot(linea(letraIva: 'B')));
+
+      DesgloseIvaTicketPrint desglose({String? letra = 'A'}) =>
+          DesgloseIvaTicketPrint(
+            ivaPct: 10,
+            baseCents: 164,
+            cuotaCents: 16,
+            letra: letra,
+          );
+      expect(desglose(), desglose());
+      expect(desglose(), isNot(desglose(letra: null)));
+
+      PagoTicketPrint pago({int importeCents = 1000}) =>
+          PagoTicketPrint(formaPago: 'Efectivo', importeCents: importeCents);
+      expect(pago(), pago());
+      expect(pago(), isNot(pago(importeCents: 1500)));
+
+      EmpresaTicket emisor({String? web = 'www.barpepe.es'}) =>
+          EmpresaTicket(nombre: 'Bar Pepe', web: web);
+      expect(emisor(), emisor());
+      expect(emisor(), isNot(emisor(web: null)));
+    });
+
     test('igualdad por valor con logo y partidas', () {
       final logo = logoPng();
       expect(ticketCompleto(logo: logo), ticketCompleto(logo: logo));
@@ -875,6 +1001,8 @@ void main() {
       expect(informeZ(), isNot(informeZ(partidas: partidasDescuadre)));
       expect(comanda(), comanda());
       expect(comanda(), isNot(comanda(paper: PaperWidth.mm58)));
+      expect(marchar(), marchar());
+      expect(marchar(), isNot(marchar(paper: PaperWidth.mm80Dpi180)));
     });
   });
 
@@ -896,6 +1024,16 @@ void main() {
         await generarInformeZEnIsolate(informeZ(), runner: inline),
         generarInformeZ(informeZ()),
       );
+      expect(
+        await generarMarcharEnIsolate(marchar(), runner: inline),
+        generarMarchar(marchar()),
+      );
+    });
+
+    test('MARCHAR en isolate real', () async {
+      final bytes = await generarMarcharEnIsolate(marchar(), runner: spawning);
+      expect(bytes, generarMarchar(marchar()));
+      expect(decodeEscPos(bytes).texts.first, 'COCINA');
     });
 
     test('ticket con logo en isolate real', () async {

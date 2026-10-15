@@ -4,8 +4,10 @@ import '../../../core/errors/app_exception.dart';
 import '../../../core/facturascripts/documents/invoice_models.dart';
 import '../../../core/facturascripts/master_data/fs_master_models.dart';
 import '../../../core/logging/app_logger.dart';
+import '../../../core/money/money.dart';
 import '../../../core/utils/json_map.dart';
 import '../../sala/domain/linea_comanda.dart';
+import '../../sala/domain/precuenta_emitida.dart';
 import '../../sala/domain/ticket.dart';
 import '../domain/host_settings.dart';
 import '../domain/host_snapshot.dart';
@@ -25,7 +27,8 @@ import 'sync_outbox.dart';
 /// ([alCobrar]); al arrancar, [reconciliar] encola los tickets pendientes
 /// que se hubieran quedado sin trabajo. El ejecutor construye el [TicketFactura] y delega en
 /// [InvoicePort] (idempotente por `numero2 = ticket.claveFactura`); el
-/// resultado se vuelca en `Ticket.factura` del diario local.
+/// resultado, con la fecha y el total de la factura **en FS** (los que se
+/// imprimen y van al QR), se vuelca en `Ticket.factura` del diario local.
 final class BillingService extends SalaEffects {
   BillingService({
     required this._store,
@@ -143,17 +146,14 @@ final class BillingService extends SalaEffects {
   // ---------------------------------------------------------------------------
   // Operaciones para la UI
 
-  /// Reimprime el ticket (con el código de factura si ya existe).
+  /// Reimprime el ticket: la factura simplificada (ORIGINAL o DUPLICADO) si
+  /// se puede imprimir y, si no, una copia del documento provisional
+  /// (`PrintingService.imprimirDocumentoTicket`, §5.16).
   ///
   /// Lanza [ValidationException] si el ticket no está en el turno y
   /// [PrinterException] si no hay impresora.
-  Future<void> reimprimir(String ticketId) async {
-    final ticket = _store.snapshot.ticketPorId(ticketId);
-    if (ticket == null) {
-      throw ValidationException('El ticket $ticketId no está en el turno');
-    }
-    await _printing.imprimirTicket(ticket, reimpresion: true);
-  }
+  Future<void> reimprimir(String ticketId) =>
+      _printing.imprimirDocumentoTicket(ticketId);
 
   /// Vuelve a intentar la factura de un ticket rechazado.
   Future<void> reintentarFactura(String ticketId) =>
@@ -249,11 +249,7 @@ final class BillingService extends SalaEffects {
       codpago: codpago,
       codalmacen: _fiscal.codalmacen,
       fechaHora: ticket.fechaHora,
-      observaciones: [
-        'TPV ticket ${ticket.numeroLocal}',
-        'Mesa ${ticket.nombreMesa}',
-        if (ticket.camarero case final c?) 'Camarero $c',
-      ].join(' · '),
+      observaciones: _observacionesDe(ticket),
       lineas: lineas,
       totalEsperadoCents: ticket.totalCents,
       modoPago: modoPago,
@@ -274,6 +270,11 @@ final class BillingService extends SalaEffects {
       emitida: resultado.emitida,
       avisos: avisos,
       actualizadoEn: _now(),
+      // Nunca `resultado.totalCents`, que puede ser el del TPV: si FS no
+      // devolvió el total (o la fecha), quedan nulos y la factura no se
+      // imprime.
+      fecha: resultado.fecha,
+      totalFsCents: resultado.totalFsCents,
     );
     await _actualizarTicket(ticket.id, sincronizada);
     _log.info(
@@ -282,6 +283,28 @@ final class BillingService extends SalaEffects {
     );
     return avisos;
   }
+
+  /// Observaciones de la factura: «TPV ticket 15 · Mesa Mesa 7 · Camarero
+  /// Ana» y, solo si las hay, «· Precuentas nº 1 14:10 67,00 €, nº 2 14:25
+  /// 70,50 €» (número, hora y total de cada precuenta emitida a la mesa, que
+  /// así sobreviven al Cierre Z). El plugin `Hosteleria` documenta este
+  /// formato: se amplía por el final, nunca se cambia.
+  static String _observacionesDe(Ticket ticket) => [
+    'TPV ticket ${ticket.numeroLocal}',
+    'Mesa ${ticket.nombreMesa}',
+    if (ticket.camarero case final c?) 'Camarero $c',
+    if (ticket.precuentas.isNotEmpty)
+      'Precuentas ${ticket.precuentas.map(_resumenDe).join(', ')}',
+  ].join(' · ');
+
+  /// «nº 1 14:10 67,00 €»: número, hora y total de una precuenta.
+  static String _resumenDe(PrecuentaEmitida p) =>
+      'nº ${p.numero} ${_horaCorta(p.emitidaEn)} ${formatCents(p.totalCents)}';
+
+  /// `HH:mm` de una hora local.
+  static String _horaCorta(DateTime t) =>
+      '${t.hour.toString().padLeft(2, '0')}:'
+      '${t.minute.toString().padLeft(2, '0')}';
 
   /// Impuesto de una línea que llegó sin `codimpuesto`: el del artículo en
   /// el catálogo del host, el de los ajustes fiscales o el por defecto del
@@ -358,16 +381,21 @@ final class BillingService extends SalaEffects {
     return null;
   }
 
+  /// Escribe [factura] en el ticket del diario. Lee el ticket **dentro** de
+  /// la clausura de `update`, nunca antes: la impresión escribe
+  /// `Ticket.impresion` sobre el mismo ticket mientras se factura, y
+  /// `conFactura` conserva esa marca y las precuentas.
   Future<void> _actualizarTicket(
     String ticketId,
     FacturaSincronizada factura,
   ) async {
-    final ticket = _store.snapshot.ticketPorId(ticketId);
-    if (ticket == null) {
+    final despues = await _store.update((s) {
+      final ticket = s.ticketPorId(ticketId);
+      return ticket == null ? s : s.conTicket(ticket.conFactura(factura));
+    });
+    if (despues.ticketPorId(ticketId) == null) {
       _log.info('Ticket $ticketId ya no está en el turno; factura $factura');
-      return;
     }
-    await _store.update((s) => s.conTicket(ticket.conFactura(factura)));
   }
 
   void _onJobTerminado(SyncJob job) {

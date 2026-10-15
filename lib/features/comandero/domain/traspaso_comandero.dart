@@ -22,8 +22,8 @@ final class TraspasoComandero extends Equatable {
   /// vuelto al carrito: hay que revisarlas y volver a enviarlas.
   final int lineasDevueltas;
 
-  /// Peticiones en cola que no son comandas (anulaciones) y no se pueden
-  /// traspasar: el camarero tiene que repetirlas.
+  /// Peticiones en cola que no son comandas (anulaciones y marchas de pases)
+  /// y no se pueden traspasar: el camarero tiene que repetirlas.
   final int peticionesPerdidas;
 
   /// Total de líneas en los carritos traspasados.

@@ -121,6 +121,7 @@ void main() {
       runner: const InlineIsolateRunner(),
       settings: const ImpresionSettings(imprimirTicketAlCobrar: false),
       nombreTpv: 'Sandbox',
+      store: f.store,
     );
     final ports = FsPorts(fsApi);
     final billing = BillingService(

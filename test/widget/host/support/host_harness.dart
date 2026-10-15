@@ -1,6 +1,6 @@
 /// Banco de pruebas de las pantallas del host: un [HostRuntime] real sobre
-/// un diario en memoria, sin red, ERP, MySQL ni impresora, y los ajustes en
-/// un repositorio en memoria.
+/// un diario en memoria, sin red, MySQL ni (salvo que se pasen) ERP ni
+/// impresora, y los ajustes en un repositorio en memoria.
 library;
 
 import 'package:flutter/material.dart';
@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/misc.dart' show Override;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:proyecto_comandero/app/app.dart';
 import 'package:proyecto_comandero/core/facturascripts/catalog/catalog_models.dart';
+import 'package:proyecto_comandero/core/facturascripts/fs_api.dart';
 import 'package:proyecto_comandero/core/isolates/isolate_runner.dart';
 import 'package:proyecto_comandero/features/host/application/catalog_service.dart';
 import 'package:proyecto_comandero/features/host/application/host_runtime.dart';
@@ -17,6 +18,7 @@ import 'package:proyecto_comandero/features/host/data/in_memory_host_state_repos
 import 'package:proyecto_comandero/features/host/domain/host_snapshot.dart';
 import 'package:proyecto_comandero/features/host/presentation/host_home_page.dart';
 import 'package:proyecto_comandero/features/host/presentation/providers.dart';
+import 'package:proyecto_comandero/features/impresion/domain/formato_impresion.dart';
 import 'package:proyecto_comandero/features/sala/domain/comanda.dart';
 import 'package:proyecto_comandero/features/sala/domain/linea_comanda.dart';
 import 'package:proyecto_comandero/features/settings/data/in_memory_settings_repository.dart';
@@ -26,18 +28,46 @@ import 'package:proyecto_comandero/features/settings/presentation/settings_provi
 import '../../../features/host/fakes/fake_ports.dart';
 import '../../../features/host/support/host_test_support.dart';
 
-export '../../../features/host/fakes/fake_ports.dart' show FakeClock;
+export '../../../features/host/fakes/fake_ports.dart'
+    show
+        FakeClock,
+        FakeInvoicePort,
+        FakeMasterDataPort,
+        FakePrinterPort,
+        PrintedJob;
 export '../../../features/host/support/host_test_support.dart'
     show catalogoPrueba, linea, mesasPrueba;
 
+/// Impresoras de `ajustesPrueba(conImpresora: true)`: una por rol, para que
+/// cada trabajo se distinga por su dirección.
+final PrinterEndpoint impresoraTicketsPrueba = PrinterEndpoint('192.168.1.50');
+final PrinterEndpoint impresoraCocinaPrueba = PrinterEndpoint('192.168.1.51');
+final PrinterEndpoint impresoraBarraPrueba = PrinterEndpoint('192.168.1.52');
+
 /// Ajustes de un host de prueba con las mesas de `mesasPrueba`.
-AppSettings ajustesPrueba() => AppSettings(
+///
+/// Con [conImpresora], una impresora por rol ([impresoraTicketsPrueba],
+/// [impresoraCocinaPrueba] e [impresoraBarraPrueba]); los trabajos solo se
+/// ven si el banco recibe además una `FakePrinterPort`
+/// (`HostHarness(impresora:)`), porque si no el runtime crearía una cola
+/// real. [formato] es el `impresion.formato` (perfiles, ticket, emisión, QR y
+/// pases). Con los valores por defecto, los ajustes de siempre.
+AppSettings ajustesPrueba({
+  bool conImpresora = false,
+  FormatoImpresion formato = const FormatoImpresion(),
+}) => AppSettings(
   deviceId: 'tablet-test',
   deviceName: 'Tablet test',
   rol: DeviceRole.host,
   fiscal: const FiscalSettings(codalmacen: 'ALG', nombreTpv: 'TPV Prueba'),
   fondoCajaCents: 10000,
   mesas: mesasPrueba,
+  impresion: PrintingSettings(
+    tickets: conImpresora ? impresoraTicketsPrueba : null,
+    cocina: conImpresora ? impresoraCocinaPrueba : null,
+    barra: conImpresora ? impresoraBarraPrueba : null,
+    formato: formato,
+  ),
 );
 
 /// Diario inicial con las mesas y el catálogo de prueba.
@@ -73,17 +103,29 @@ Comanda comandaPrueba(
 
 final class HostHarness {
   /// [repo] sustituye al diario en memoria (por ejemplo, uno de escritura
-  /// lenta); entonces [inicial] se ignora.
+  /// lenta); entonces [inicial] se ignora. [impresora] y [api] se pasan a
+  /// [HostRuntime.create] como `printerPort` y `api`.
   HostHarness({
     HostSnapshot? inicial,
     AppSettings? ajustes,
     HostStateRepository? repo,
+    this.impresora,
+    this.api,
   }) : repo = repo ?? InMemoryHostStateRepository(inicial ?? snapshotPrueba()),
        ajustes = ajustes ?? ajustesPrueba();
 
   final FakeClock clock = FakeClock();
   final HostStateRepository repo;
   final AppSettings ajustes;
+
+  /// Cola de impresión del runtime: recoge los trabajos en
+  /// [FakePrinterPort.jobs]. Sin ella, el runtime crea la suya según los
+  /// ajustes (ninguna si no hay impresoras).
+  final FakePrinterPort? impresora;
+
+  /// Cliente del ERP del runtime, aunque los ajustes no tengan ERP (p. ej.
+  /// para «Actualizar desde FacturaScripts»).
+  final FsApi? api;
   HostRuntime? _runtime;
 
   /// Runtimes creados por la fábrica (uno por cada construcción).
@@ -103,6 +145,8 @@ final class HostHarness {
       final runtime = await HostRuntime.create(
         settings: settings,
         stateRepo: repo,
+        api: api,
+        printerPort: impresora,
         runner: ref.read(isolateRunnerProvider),
         now: clock.call,
         discoveryEnabled: false,

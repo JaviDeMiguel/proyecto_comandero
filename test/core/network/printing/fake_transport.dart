@@ -17,14 +17,27 @@ final class SentJob {
 
 /// Transporte en memoria para probar `PrintQueue` sin sockets.
 ///
-/// Permite simular fallos transitorios ([failuresBeforeSuccess]), retener los
-/// envíos hasta que el test los libere ([holdSends] + [held]) y comprobar
-/// cuántos envíos hubo a la vez.
+/// Permite simular fallos transitorios ([failuresBeforeSuccess]), fallos
+/// concretos en orden ([failNext]), retener los envíos hasta que el test los
+/// libere ([holdSends] + [held]) y comprobar cuántos envíos hubo a la vez.
 final class FakeTransport implements RawPrinterTransport {
   FakeTransport({this.failuresBeforeSuccess = 0, this.holdSends = false});
 
   /// Envíos que fallarán con [PrinterException] antes de empezar a funcionar.
   int failuresBeforeSuccess;
+
+  /// Fallos programados: cada envío consume y lanza el primero, antes de
+  /// contar [failuresBeforeSuccess]. Permite distinguir un fallo de conexión
+  /// ([PrinterConnectException]) de uno de escritura o cierre
+  /// ([PrinterException]) o de una excepción ajena al transporte.
+  final List<Exception> faults = <Exception>[];
+
+  /// Programa [error] para los próximos [times] envíos.
+  void failNext(Exception error, {int times = 1}) {
+    for (var i = 0; i < times; i++) {
+      faults.add(error);
+    }
+  }
 
   /// Si es `true`, cada envío se queda esperando a que el test complete el
   /// `Completer` correspondiente de [held].
@@ -88,6 +101,7 @@ final class FakeTransport implements RawPrinterTransport {
         }
         await gate.future;
       }
+      if (faults.isNotEmpty) throw faults.removeAt(0);
       if (failuresBeforeSuccess > 0) {
         failuresBeforeSuccess--;
         throw PrinterException('Fallo simulado al imprimir en $endpoint');

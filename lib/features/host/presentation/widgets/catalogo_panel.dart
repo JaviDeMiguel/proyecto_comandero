@@ -30,10 +30,15 @@ class CatalogoPanel extends StatefulWidget {
     super.key,
     required this.catalogo,
     required this.onArticulo,
+    this.encabezado,
   });
 
   final CatalogSnapshot catalogo;
   final ValueChanged<ArticuloCatalogo> onArticulo;
+
+  /// Se pinta encima del buscador (p. ej. el selector de pase de la mesa).
+  /// Sin él, el panel empieza por el buscador.
+  final Widget? encabezado;
 
   @override
   State<CatalogoPanel> createState() => _CatalogoPanelState();
@@ -67,6 +72,11 @@ class _CatalogoPanelState extends State<CatalogoPanel> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        if (widget.encabezado case final encabezado?)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+            child: encabezado,
+          ),
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
           child: TextField(

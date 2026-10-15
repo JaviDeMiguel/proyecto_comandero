@@ -14,9 +14,11 @@ import 'package:proyecto_comandero/features/comandero/domain/comandero_exception
 import 'package:proyecto_comandero/features/comandero/domain/comandero_state.dart';
 import 'package:proyecto_comandero/features/comandero/domain/pedido_en_edicion.dart';
 import 'package:proyecto_comandero/features/comandero/domain/traspaso_comandero.dart';
+import 'package:proyecto_comandero/features/comandero/presentation/comandero_gateway.dart';
 import 'package:proyecto_comandero/features/sala/domain/comanda.dart';
 import 'package:proyecto_comandero/features/sala/domain/enrutamiento_comandas.dart';
 import 'package:proyecto_comandero/features/sala/domain/linea_comanda.dart';
+import 'package:proyecto_comandero/features/sala/domain/pases.dart';
 import 'package:proyecto_comandero/features/sala/protocol/sala_messages.dart';
 import 'package:test/test.dart';
 
@@ -115,6 +117,18 @@ void main() {
       SalaMessageTypes.salaSnapshotGet,
       SalaMessageTypes.catalogoGet,
     ]);
+  });
+
+  test('buscarHosts emite Buscando en la misma llamada', () async {
+    final controller = newController();
+    final busqueda = controller.buscarHosts();
+    expect(
+      controller.state,
+      isA<Buscando>(),
+      reason: 'sin destinos que calcular no hay ninguna espera antes',
+    );
+    expect(await busqueda, hasLength(1));
+    expect(controller.state, isA<SinHost>());
   });
 
   test(
@@ -1118,6 +1132,575 @@ void main() {
     // Importar de nuevo no duplica.
     expect(nuevo.importarPedidos(traspaso.pedidos), 0);
     expect(nuevo.exportarPedidos(), hasLength(2));
+  });
+
+  group('WP-10: pases y comensales', () {
+    const pasesHost = PasesConfig(
+      nombres: ['Entrantes', 'Principales', 'Postres'],
+      marcharAlEnviar: false,
+    );
+
+    /// Conecta y deja en el host una paella del pase 2 en la mesa m1.
+    Future<ComanderoController> conPaellaEnPase2() async {
+      final controller = newController();
+      controller.conectar(HostObjetivo(endpoint: host.endpoint));
+      await waitConectado(controller);
+      controller.anadirReferencia('m1', 'PAELLA', pase: 2);
+      final result = await controller.enviar('m1', camarero: 'Ana');
+      expect(result.comanda.lineas.single.pase, 2);
+      expect(result.comanda.lineas.single.envio, 1);
+      expect(result.comanda.marchas, isEmpty);
+      return controller;
+    }
+
+    test('lee pases del snapshot y los actualiza con '
+        'enrutamiento.changed', () async {
+      host.pases = pasesHost;
+      final controller = newController();
+      expect(controller.pases, isNull, reason: 'sin snapshot aún');
+      controller.conectar(HostObjetivo(endpoint: host.endpoint));
+      final conectado = await waitConectado(controller);
+      expect(conectado.sala.pases, pasesHost);
+      expect(controller.pases, pasesHost);
+      expect(controller.pases!.activos, isTrue);
+      expect(controller.pases!.nombreDe(2), 'Principales');
+
+      // El host desactiva los pases: llega por el mismo evento que el
+      // enrutamiento y el comandero vuelve a pedir el snapshot.
+      expect(host.cambiarPases(const PasesConfig(activos: false)), 1);
+      await waitState<Conectado>(
+        controller.states,
+        controller.state,
+        (s) => s.sala.pases?.activos == false,
+        what: 'snapshot con los pases desactivados',
+      );
+      expect(controller.pases, const PasesConfig(activos: false));
+
+      // Un host antiguo no publica pases.
+      expect(host.cambiarPases(null), 1);
+      await waitState<Conectado>(
+        controller.states,
+        controller.state,
+        (s) => s.sala.pases == null,
+        what: 'snapshot sin pases',
+      );
+      expect(controller.pases, isNull);
+    });
+
+    test('anadir y editarLinea llevan el pase del carrito', () async {
+      final controller = newController();
+      final cana = kCatalogoPrueba.porReferencia('CANA')!;
+      controller.anadir('m1', cana, pase: 1);
+      controller.anadir('m1', cana, pase: 1);
+      controller.anadir('m1', cana, pase: 2);
+      var pedido = controller.pedido('m1');
+      expect(pedido.lineas.map((l) => l.pase), [1, 2]);
+      expect(pedido.lineas.first.cantidad, 2);
+
+      pedido = controller.editarLinea(
+        'm1',
+        'linea-1',
+        cantidad: 3,
+        nota: 'fría',
+        pase: () => 3,
+      );
+      expect(pedido.lineaPorId('linea-1')!.pase, 3);
+      expect(pedido.lineaPorId('linea-1')!.cantidad, 3);
+      pedido = controller.editarLinea(
+        'm1',
+        'linea-1',
+        cantidad: 3,
+        nota: 'fría',
+        pase: () => null,
+      );
+      expect(pedido.lineaPorId('linea-1')!.pase, isNull);
+      pedido = controller.editarLinea('m1', 'linea-1', cantidad: 1, nota: null);
+      expect(pedido.lineaPorId('linea-1')!.pase, isNull);
+      expect(
+        () => controller.anadir('m1', cana, pase: 0),
+        throwsA(isA<ValidationException>()),
+      );
+    });
+
+    test('marcharPase manda una petición fiable con comandaId y actualiza '
+        'la comanda', () async {
+      host.pases = pasesHost;
+      final controller = await conPaellaEnPase2();
+      final comandaId = host.comandas['m1']!.id;
+
+      final comanda = await controller.marcharPase('m1', 2);
+      final payload = host.marchasRecibidas.single;
+      expect(payload.mesaId, 'm1');
+      expect(payload.pase, 2);
+      expect(payload.comandaId, comandaId);
+      expect(payload.marchaId, isNotEmpty);
+      expect(
+        payload.camarero,
+        isNull,
+        reason: 'el host pone el nombre del dispositivo',
+      );
+      expect(host.requests.last, SalaMessageTypes.paseMarchar);
+
+      final marcha = comanda.marchas.single;
+      expect(marcha.id, payload.marchaId);
+      expect(marcha.pase, 2);
+      expect(marcha.camarero, 'Comandero 1');
+      expect(marcha.repetida, isFalse);
+      expect(marcha.automatica, isFalse);
+      expect(controller.comandaDe('m1'), comanda);
+      expect(controller.pendientes, 0);
+
+      // Otra pulsación es otra petición: marchaId nuevo y marcha repetida.
+      final repetida = await controller.marcharPase('m1', 2);
+      expect(host.marchasRecibidas, hasLength(2));
+      expect(host.marchasRecibidas.last.marchaId, isNot(payload.marchaId));
+      expect(repetida.marchas, hasLength(2));
+      expect(repetida.marchas.last.repetida, isTrue);
+      expect(host.marchas, hasLength(2));
+    });
+
+    test('marcharPase: la retransmisión tras reconectar lleva el mismo '
+        'marchaId y el host registra una sola marcha', () async {
+      host.pases = pasesHost;
+      final controller = await conPaellaEnPase2();
+
+      // El host registra la marcha pero su ack no llega: la petición sigue
+      // en la cola fiable del comandero.
+      final retener = host.retenerMarchar = Completer<void>();
+      final marchando = controller.marcharPase('m1', 2);
+      await esperarQue(
+        () => host.marchas.isNotEmpty,
+        'el host registra la marcha',
+      );
+      expect(controller.pendientes, 1);
+      final enviado = host.marchasRecibidas.single;
+      expect(host.comandas['m1']!.marchaPorId(enviado.marchaId), isNotNull);
+
+      // El host se reinicia: pierde la caché de respuestas del transporte
+      // pero conserva el diario (la comanda con la marcha).
+      final antiguo = host;
+      addTearDown(antiguo.dispose);
+      final diario = Map.of(antiguo.comandas);
+      await antiguo.server.stop();
+      retener.complete();
+      await waitState<Reconectando>(
+        controller.states,
+        controller.state,
+        (_) => true,
+        what: 'Reconectando',
+      );
+      host = FakeSalaHost(tcpPort: antiguo.tcpPort, pases: pasesHost)
+        ..comandas.addAll(diario);
+      await host.start();
+
+      // La cola fiable retransmite el mismo mensaje: el payload (y por tanto
+      // el marchaId) es idéntico y el host reconoce la marcha del diario.
+      final comanda = await marchando.timeout(kWait);
+      final retransmitido = host.marchasRecibidas.single;
+      expect(retransmitido, enviado);
+      expect(retransmitido.marchaId, enviado.marchaId);
+      expect(retransmitido.comandaId, diario['m1']!.id);
+      expect(
+        host.marchas,
+        isEmpty,
+        reason: 'ya estaba en el diario: ni se repite ni se reimprime',
+      );
+      expect(host.comandas['m1']!.marchas, hasLength(1));
+      expect(comanda.marchas.single.id, enviado.marchaId);
+      expect(controller.comandaDe('m1')!.marchas.single.id, enviado.marchaId);
+      await waitState<Conectado>(
+        controller.states,
+        controller.state,
+        (s) => s.pendientes == 0,
+        what: 'Conectado sin pendientes',
+      );
+    });
+
+    test('los rechazos del host al marchar llegan tipados y con la '
+        'mesa', () async {
+      host.pases = pasesHost;
+      final controller = await conPaellaEnPase2();
+      await expectLater(
+        controller.marcharPase('m1', 1),
+        throwsA(
+          isA<ComanderoSalaException>()
+              .having((e) => e.paseSinLineas, 'paseSinLineas', isTrue)
+              .having((e) => e.paseNoValido, 'paseNoValido', isFalse)
+              .having((e) => e.mesaId, 'mesaId', 'm1')
+              .having((e) => e.retryable, 'retryable', isFalse)
+              .having((e) => e.message, 'message', contains('Entrantes')),
+        ),
+      );
+      await expectLater(
+        controller.marcharPase('m1', 9),
+        throwsA(
+          isA<ComanderoSalaException>()
+              .having((e) => e.paseNoValido, 'paseNoValido', isTrue)
+              .having((e) => e.mesaId, 'mesaId', 'm1'),
+        ),
+      );
+      await expectLater(
+        controller.marcharPase('m1', 0),
+        throwsA(isA<ValidationException>()),
+      );
+      expect(host.marchasRecibidas, hasLength(2));
+
+      // Sin comanda a la vista no se manda nada (iría sin comandaId).
+      await expectLater(
+        controller.marcharPase('m2', 1),
+        throwsA(
+          isA<ComanderoSalaException>()
+              .having((e) => e.mesaSinComanda, 'mesaSinComanda', isTrue)
+              .having((e) => e.mesaId, 'mesaId', 'm2'),
+        ),
+      );
+      expect(host.marchasRecibidas, hasLength(2));
+
+      // La mesa se cobró y se volvió a abrir sin que el comandero lo viera:
+      // aunque la comanda nueva tenga líneas de ese pase, el host no la
+      // marcha con el comandaId de la anterior.
+      final vista = controller.comandaDe('m1')!;
+      host.comandas['m1'] = Comanda(
+        id: 'c-nueva',
+        mesaId: 'm1',
+        abiertaEn: DateTime.utc(2026, 10, 7, 12),
+        lineas: vista.lineas,
+      );
+      await expectLater(
+        controller.marcharPase('m1', 2),
+        throwsA(
+          isA<ComanderoSalaException>()
+              .having((e) => e.mesaSinComanda, 'mesaSinComanda', isTrue)
+              .having((e) => e.mesaId, 'mesaId', 'm1'),
+        ),
+      );
+      expect(host.marchasRecibidas.last.comandaId, vista.id);
+      expect(host.comandas['m1']!.marchas, isEmpty);
+      expect(host.marchas, isEmpty);
+      expect(controller.comandaDe('m1')!.marchas, isEmpty);
+      expect(controller.pendientes, 0);
+    });
+
+    test('unknown_type con un host antiguo: excepción tipada no reintentable '
+        'y sin pases en el snapshot', () async {
+      host.tiposNoAdmitidos.add(SalaMessageTypes.paseMarchar);
+      final controller = newController();
+      controller.conectar(HostObjetivo(endpoint: host.endpoint));
+      await waitConectado(controller);
+      expect(controller.pases, isNull, reason: 'el snapshot no trae pases');
+      controller.anadirReferencia('m1', 'PAELLA', pase: 2);
+      final result = await controller.enviar('m1');
+      expect(
+        result.comanda.lineas.single.pase,
+        isNull,
+        reason: 'un host sin pases descarta el pase',
+      );
+
+      await expectLater(
+        controller.marcharPase('m1', 2),
+        throwsA(
+          allOf(
+            isA<RemoteRequestException>()
+                .having((e) => e.code, 'code', ErrorCodes.unknownType)
+                .having((e) => e.retryable, 'retryable', isFalse),
+            isNot(isA<ComanderoSalaException>()),
+          ),
+        ),
+      );
+      expect(host.marchasRecibidas, isEmpty);
+      expect(controller.comandaDe('m1')!.marchas, isEmpty);
+      expect(controller.pendientes, 0);
+    });
+
+    test('fijarComensales manda un submit vacío con comandaId y la comanda '
+        'vuelve con los comensales', () async {
+      host.pases = pasesHost;
+      final controller = await conPaellaEnPase2();
+      final antes = host.comandas['m1']!;
+      expect(antes.comensales, isNull);
+
+      final comanda = await controller.fijarComensales('m1', 4);
+      expect(comanda.id, antes.id);
+      expect(comanda.comensales, 4);
+      expect(comanda.camarero, 'Ana', reason: 'conserva al primer camarero');
+      expect(comanda.lineas.map((l) => l.id), ['linea-1']);
+      expect(comanda.lineas.single.envio, 1, reason: 'no consume nº de envío');
+      final submit = host.submits.last;
+      expect(host.submits, hasLength(2));
+      expect(submit.mesaId, 'm1');
+      expect(submit.lineas, isEmpty);
+      expect(submit.comensales, 4);
+      expect(submit.comandaId, antes.id);
+      expect(controller.comandaDe('m1'), comanda);
+      expect(host.comandas['m1']!.comensales, 4);
+      expect(controller.pendientes, 0);
+
+      // Sin comanda abierta no se manda nada: el valor va en el primer envío.
+      await expectLater(
+        controller.fijarComensales('m2', 2),
+        throwsA(
+          isA<ComanderoSalaException>()
+              .having((e) => e.mesaSinComanda, 'mesaSinComanda', isTrue)
+              .having((e) => e.mesaId, 'mesaId', 'm2'),
+        ),
+      );
+      await expectLater(
+        controller.fijarComensales('m1', 0),
+        throwsA(isA<ValidationException>()),
+      );
+      await expectLater(
+        controller.fijarComensales('m1', 100),
+        throwsA(isA<ValidationException>()),
+      );
+      expect(host.submits, hasLength(2));
+
+      // El submit vacío no consumió nº de envío: el siguiente pedido es el 2.
+      controller.anadirReferencia('m1', 'CANA');
+      final siguiente = await controller.enviar('m1');
+      expect(siguiente.comanda.lineas.last.referencia, 'CANA');
+      expect(siguiente.comanda.lineas.last.envio, 2);
+      expect(siguiente.comanda.comensales, 4);
+
+      // Si la comanda que ve el comandero ya no es la abierta (se cobró y
+      // se volvió a abrir), el host no aplica nada y devuelve la actual: el
+      // comandero avisa y pide el snapshot en vez de fiarse de ella.
+      final reabierta = Comanda(
+        id: 'c-nueva',
+        mesaId: 'm1',
+        abiertaEn: DateTime.utc(2026, 10, 7, 12),
+        comensales: 2,
+      );
+      host.comandas['m1'] = reabierta;
+      final cerrada = throwsA(
+        isA<ComanderoSalaException>()
+            .having((e) => e.mesaSinComanda, 'mesaSinComanda', isTrue)
+            .having((e) => e.mesaId, 'mesaId', 'm1'),
+      );
+      await expectLater(controller.fijarComensales('m1', 6), cerrada);
+      expect(host.submits.last.comandaId, antes.id);
+      expect(host.comandas['m1'], reabierta, reason: 'el host no la toca');
+      await waitState<Conectado>(
+        controller.states,
+        controller.state,
+        (s) => s.sala.comandaDeMesa('m1')?.id == 'c-nueva',
+        what: 'snapshot con la comanda reabierta',
+      );
+      expect(controller.comandaDe('m1'), reabierta);
+
+      // Con la mesa ya libre en el host, el envío vacío no la abre y el
+      // comandero tampoco muestra la comanda vacía que le devuelve.
+      host.comandas.remove('m1');
+      await expectLater(controller.fijarComensales('m1', 3), cerrada);
+      expect(host.submits.last.comandaId, 'c-nueva');
+      expect(host.comandas, isNot(contains('m1')));
+      await waitState<Conectado>(
+        controller.states,
+        controller.state,
+        (s) => s.sala.comandaDeMesa('m1') == null,
+        what: 'snapshot con la mesa libre',
+      );
+      expect(controller.comandaDe('m1'), isNull);
+    });
+
+    test('sin host objetivo (sin conectar o tras desconectar), marcharPase y '
+        'fijarComensales fallan con SinConexionException', () async {
+      final sinHost = throwsA(
+        isA<SinConexionException>().having(
+          (e) => e.message,
+          'message',
+          'No hay ningún host configurado; conecta antes de enviar',
+        ),
+      );
+      final sinConectar = newController();
+      await expectLater(sinConectar.marcharPase('m1', 1), sinHost);
+      await expectLater(sinConectar.fijarComensales('m1', 2), sinHost);
+      // El mismo rechazo que una anulación sin host.
+      await expectLater(sinConectar.anularLinea('m1', 'linea-1'), sinHost);
+      // La validación de los argumentos va antes que la del host.
+      await expectLater(
+        sinConectar.marcharPase('m1', 0),
+        throwsA(isA<ValidationException>()),
+      );
+      await expectLater(
+        sinConectar.fijarComensales('m1', 0),
+        throwsA(isA<ValidationException>()),
+      );
+
+      host.pases = pasesHost;
+      final controller = await conPaellaEnPase2();
+      await controller.desconectar();
+      await expectLater(controller.marcharPase('m1', 2), sinHost);
+      await expectLater(controller.fijarComensales('m1', 4), sinHost);
+      expect(host.marchasRecibidas, isEmpty);
+      expect(host.submits, hasLength(1), reason: 'solo el envío de la paella');
+      expect(controller.pendientes, 0);
+    });
+
+    test('un envío sobre la comanda abierta conserva al primer camarero y '
+        'aplica los comensales', () async {
+      host.pases = pasesHost;
+      final controller = await conPaellaEnPase2();
+
+      controller.anadirReferencia('m1', 'CANA');
+      final result = await controller.enviar(
+        'm1',
+        camarero: 'Luis',
+        comensales: 3,
+      );
+      final comanda = result.comanda;
+      expect(comanda.camarero, 'Ana', reason: 'el primer camarero se queda');
+      expect(comanda.comensales, 3);
+      final paella = comanda.lineas.firstWhere((l) => l.referencia == 'PAELLA');
+      final cana = comanda.lineas.firstWhere((l) => l.referencia == 'CANA');
+      expect(paella.camarero, 'Ana');
+      expect(cana.camarero, 'Luis', reason: 'cada línea, el de su envío');
+      expect(cana.envio, 2);
+      expect(cana.pase, isNull);
+      expect(host.comandas['m1'], comanda);
+
+      // Sin comensales en el envío se conservan los de la comanda.
+      controller.anadirReferencia('m1', 'CAFE');
+      final otro = await controller.enviar('m1');
+      expect(otro.comanda.comensales, 3);
+      expect(otro.comanda.camarero, 'Ana');
+      expect(otro.comanda.lineas.last.envio, 3);
+    });
+
+    test('cerrarParaTraspaso cuenta las marchas en cola en '
+        'peticionesPerdidas', () async {
+      host.pases = pasesHost;
+      final controller = await conPaellaEnPase2();
+      await host.server.stop();
+      await waitState<Reconectando>(
+        controller.states,
+        controller.state,
+        (_) => true,
+        what: 'Reconectando',
+      );
+
+      final marcha = controller.marcharPase('m1', 2);
+      final anulacion = controller.anularLinea('m1', 'linea-1', motivo: 'no');
+      expect(controller.pendientes, 2);
+      final fallos = Future.wait<void>([
+        expectLater(marcha, throwsA(isA<NetworkException>())),
+        expectLater(anulacion, throwsA(isA<NetworkException>())),
+      ]);
+      final traspaso = await controller.cerrarParaTraspaso();
+      await fallos;
+      expect(traspaso.peticionesPerdidas, 2);
+      expect(traspaso.lineasDevueltas, 0);
+      expect(host.marchas, isEmpty);
+    });
+
+    test('ControllerComanderoGateway delega en el controlador, también el '
+        'pase, las marchas y los comensales', () async {
+      host.pases = pasesHost;
+      final controller = newController();
+      final ComanderoGateway gateway = ControllerComanderoGateway(controller);
+      final cambios = <PedidoEnEdicion>[];
+      final subs = [
+        gateway.pedidosCambiados.listen(cambios.add),
+        gateway.avisos.listen((_) {}),
+      ];
+      addTearDown(() async {
+        for (final sub in subs) {
+          await sub.cancel();
+        }
+      });
+      Future<Conectado> conectado() => waitState<Conectado>(
+        gateway.states,
+        gateway.state,
+        (_) => true,
+        what: 'Conectado',
+      );
+      expect(gateway.config, controller.config);
+      expect(gateway.state, isA<SinHost>());
+      expect(gateway.pases, isNull);
+
+      final hosts = await gateway.buscarHosts();
+      gateway.conectarDescubierto(hosts.single);
+      await conectado();
+      expect(gateway.sala, same(controller.sala));
+      expect(gateway.catalogo, kCatalogoPrueba);
+      expect(gateway.pases, pasesHost);
+
+      // Carrito, con el pase de cada línea.
+      final paella = kCatalogoPrueba.porReferencia('PAELLA')!;
+      final cana = kCatalogoPrueba.porReferencia('CANA')!;
+      gateway.anadir('m1', paella, pase: 2);
+      expect(gateway.pedido('m1').lineaPorId('linea-1')!.pase, 2);
+      gateway.anadir('m1', cana, cantidad: 2, nota: 'fría');
+      gateway.cambiarCantidad('m1', 'linea-2', 3);
+      gateway.cambiarNota('m1', 'linea-2', 'muy fría');
+      gateway.editarLinea(
+        'm1',
+        'linea-1',
+        cantidad: 1,
+        nota: 'mixta',
+        pase: () => 1,
+      );
+      final pedido = gateway.pedido('m1');
+      expect(pedido, controller.pedido('m1'));
+      expect(pedido.lineaPorId('linea-1')!.pase, 1);
+      expect(pedido.lineaPorId('linea-1')!.nota, 'mixta');
+      expect(pedido.lineaPorId('linea-2')!.cantidad, 3);
+      expect(pedido.lineaPorId('linea-2')!.nota, 'muy fría');
+      await Future<void>.delayed(Duration.zero); // el broadcast es asíncrono
+      expect(cambios.last, pedido);
+      final copia = gateway.exportarPedidos();
+      expect(gateway.quitar('m1', 'linea-2').lineas, hasLength(1));
+      expect(gateway.importarPedidos(copia), 1);
+      expect(gateway.vaciar('m2').estaVacio, isTrue);
+
+      // Peticiones al host.
+      final enviado = await gateway.enviar(
+        'm1',
+        camarero: 'Ana',
+        comensales: 2,
+      );
+      expect(enviado.lineasNuevas, 2);
+      expect(gateway.pendientes, 0);
+      final marchada = await gateway.marcharPase('m1', 1);
+      expect(marchada.marchas.single.pase, 1);
+      expect(host.marchasRecibidas.single.comandaId, enviado.comanda.id);
+      final conComensales = await gateway.fijarComensales('m1', 5);
+      expect(conComensales.comensales, 5);
+      final anulada = await gateway.anularLinea(
+        'm1',
+        'linea-2',
+        motivo: 'repetida',
+      );
+      expect(anulada.lineaPorId('linea-2')!.estado, EstadoLinea.anulada);
+      final cuenta = await gateway.pedirCuenta('m1');
+      expect(cuenta.cuentaSolicitada, isTrue);
+      await gateway.refrescarSala();
+      expect(gateway.sala!.comandaDeMesa('m1')!.comensales, 5);
+
+      // Conexión: ajustes sin cambios, desconectar y volver a conectar.
+      gateway.actualizarConexion(pairingCode: null, hostManual: null);
+      await gateway.desconectar();
+      expect(gateway.state, isA<SinHost>());
+      gateway.conectarManual('127.0.0.1:${host.tcpPort}');
+      await conectado();
+      gateway.conectar(HostObjetivo(endpoint: host.endpoint));
+      expect(gateway.state, isA<Conectado>(), reason: 'mismo host: no corta');
+      final traspaso = await gateway.cerrarParaTraspaso();
+      expect(traspaso.peticionesPerdidas, 0);
+      expect(traspaso.pedidos, isEmpty);
+    });
+
+    test('ControllerComanderoGateway: iniciar conecta y dispose libera el '
+        'controlador', () async {
+      final controller = newController();
+      final gateway = ControllerComanderoGateway(controller);
+      expect(await gateway.iniciar(), isTrue);
+      await waitConectado(controller);
+      await gateway.dispose();
+      expect(
+        () => gateway.anadir('m1', kCatalogoPrueba.porReferencia('CANA')!),
+        throwsStateError,
+      );
+    });
   });
 
   test('dispose limpio: cierra streams y no emite más', () async {

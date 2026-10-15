@@ -199,13 +199,13 @@ final class _TraspasoEntreControladores {
     final devueltas =
         '${traspaso.lineasDevueltas} línea(s) que se estaban enviando han '
         'vuelto al carrito: revísalas y vuelve a enviarlas';
-    final anulaciones =
-        '${traspaso.peticionesPerdidas} anulación(es) sin confirmar se han '
-        'cancelado: repítelas';
+    final peticiones =
+        '${traspaso.peticionesPerdidas} petición(es) sin confirmar '
+        '(anulaciones o marchas) se han cancelado: repítelas';
     final partes = [
       if (fallo) perdidas,
       if (!fallo && traspaso.lineasDevueltas > 0) devueltas,
-      if (traspaso.peticionesPerdidas > 0) anulaciones,
+      if (traspaso.peticionesPerdidas > 0) peticiones,
     ];
     if (partes.isEmpty) return;
     _destino = gateway;
@@ -262,6 +262,42 @@ final pedidoProvider = StreamProvider.family<PedidoEnEdicion, String>((
     gateway.pedidosCambiados.where((pedido) => pedido.mesaId == mesaId),
   );
 });
+
+/// Pases de una mesa cuya marcha espera la respuesta del host (o la
+/// reconexión, si quedó en cola).
+///
+/// Vive fuera de `PedidoPage` y no se libera al cerrarla: si el camarero
+/// sale de la mesa y vuelve con la marcha aún en cola, el pase sigue sin
+/// ofrecer «MARCHAR». El controlador no filtra una segunda petición, que
+/// llegaría a cocina como un MARCHAR repetido.
+final marchasEnCursoProvider =
+    NotifierProvider.family<MarchasEnCurso, Set<int>, String>(
+      // La mesa solo separa el estado de cada una.
+      (_) => MarchasEnCurso(),
+    );
+
+/// Estado de [marchasEnCursoProvider] para una mesa.
+final class MarchasEnCurso extends Notifier<Set<int>> {
+  @override
+  Set<int> build() => const {};
+
+  /// Anota la marcha de [pase] hasta que [marcha] termine, bien o con error
+  /// (quien la lanzó atiende el resultado).
+  void seguir(int pase, Future<Object?> marcha) {
+    state = {...state, pase};
+    void terminar() {
+      if (!ref.mounted) return;
+      state = {
+        for (final enCurso in state)
+          if (enCurso != pase) enCurso,
+      };
+    }
+
+    unawaited(
+      marcha.then<void>((_) => terminar(), onError: (Object _) => terminar()),
+    );
+  }
+}
 
 /// Stream que emite `actual()` y después los eventos de [cambios], sin
 /// perder ninguno: se suscribe a [cambios] antes de leer el valor actual.

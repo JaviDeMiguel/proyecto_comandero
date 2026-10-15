@@ -1,5 +1,6 @@
 import '../../sala/domain/comanda.dart';
 import '../../sala/domain/linea_comanda.dart';
+import '../../sala/domain/marcha_pase.dart';
 import '../../sala/domain/mesa.dart';
 import '../../sala/domain/ticket.dart';
 import '../domain/host_snapshot.dart';
@@ -80,6 +81,17 @@ base class SalaEffects {
       Error.throwWithStackTrace(error, stackTrace);
     }
   }
+
+  /// Se registró [marcha] (nueva, nunca una retransmisión) en [comanda]:
+  /// [lineas] son las activas del pase marchado, para imprimir el MARCHAR en
+  /// cada puesto. Las marchas automáticas al aceptar líneas no pasan por
+  /// aquí: sus líneas ya salen normales en la comanda de ese envío.
+  Future<void> onPaseMarchado(
+    Mesa mesa,
+    Comanda comanda,
+    MarchaPase marcha,
+    List<LineaComanda> lineas,
+  ) async {}
 
   /// La mesa se cobró y [ticket] quedó en el diario del turno.
   Future<void> onMesaCobrada(Ticket ticket) async {}

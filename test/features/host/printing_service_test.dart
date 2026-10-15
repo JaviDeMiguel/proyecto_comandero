@@ -1,13 +1,19 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:proyecto_comandero/core/errors/app_exception.dart';
 import 'package:proyecto_comandero/core/isolates/escpos/escpos.dart';
 import 'package:proyecto_comandero/core/isolates/isolate_runner.dart';
 import 'package:proyecto_comandero/core/network/printing/raw_printer_transport.dart';
+import 'package:proyecto_comandero/features/host/application/impresion/mapeo_documentos.dart'
+    show referenciaCorta;
 import 'package:proyecto_comandero/features/host/application/printing_service.dart';
+import 'package:proyecto_comandero/features/host/domain/empresa_emisora.dart';
 import 'package:proyecto_comandero/features/host/domain/host_settings.dart';
+import 'package:proyecto_comandero/features/impresion/domain/formato_impresion.dart';
 import 'package:proyecto_comandero/features/sala/domain/enrutamiento_comandas.dart';
 import 'package:proyecto_comandero/features/sala/domain/linea_comanda.dart';
+import 'package:proyecto_comandero/features/sala/domain/pases.dart';
 import 'package:proyecto_comandero/features/sala/domain/ticket.dart';
 import 'package:test/test.dart';
 
@@ -20,6 +26,11 @@ String textoDe(Uint8List bytes) => decodeEscPos(bytes).texts.join('|');
 bool abreCajon(Uint8List bytes) =>
     decodeEscPos(bytes).named('drawer').isNotEmpty;
 
+const EmpresaTicket _empresa = EmpresaTicket(
+  nombre: 'Bar Manolo',
+  cifnif: 'B12345678',
+);
+
 void main() {
   late SalaFixture f;
   late FakePrinterPort printer;
@@ -27,6 +38,17 @@ void main() {
   final cocina = PrinterEndpoint('10.0.0.10');
   final barra = PrinterEndpoint('10.0.0.11');
   final tickets = PrinterEndpoint('10.0.0.12');
+
+  ImpresionSettings ajustes({
+    FormatoImpresion formato = const FormatoImpresion(),
+    bool abrirCajon = true,
+  }) => ImpresionSettings(
+    cocina: cocina,
+    barra: barra,
+    tickets: tickets,
+    abrirCajonEfectivo: abrirCajon,
+    formato: formato,
+  );
 
   setUp(() async {
     // Bebidas (y sus subfamilias) a barra; el resto, a cocina.
@@ -40,15 +62,11 @@ void main() {
     service = PrintingService(
       alerts: f.alerts,
       runner: const InlineIsolateRunner(),
-      settings: ImpresionSettings(
-        cocina: cocina,
-        barra: barra,
-        tickets: tickets,
-        abrirCajonEfectivo: true,
-      ),
+      settings: ajustes(),
       nombreTpv: 'Barra',
+      store: f.store,
       printer: printer,
-      empresa: const EmpresaTicket(nombre: 'Bar Manolo', cifnif: 'B12345678'),
+      empresa: _empresa,
       now: f.clock.call,
     );
     f.sala.addEffects(service);
@@ -63,6 +81,22 @@ void main() {
     await f.sala.idle();
     await service.idle();
   }
+
+  /// Marca [ticketId] como sincronizado con FS con su fecha y su total.
+  Future<void> sincronizar(String ticketId, {String codigo = 'F2026S9'}) =>
+      f.store.update((s) {
+        final t = s.ticketPorId(ticketId)!;
+        return s.conTicket(
+          t.conFactura(
+            FacturaSincronizada(
+              estado: EstadoSincronizacion.sincronizado,
+              codigo: codigo,
+              fecha: DateTime(2026, 10, 7, 13, 5),
+              totalFsCents: t.totalCents,
+            ),
+          ),
+        );
+      });
 
   test('al aceptar líneas imprime una comanda por destino', () async {
     await f.sala.aceptarLineas(
@@ -95,6 +129,36 @@ void main() {
     expect(printer.jobs, hasLength(2));
   });
 
+  test('la cabecera de la comanda lleva el nº de envío, la mesa con su zona, '
+      'los comensales y el camarero del envío', () async {
+    await f.sala.aceptarLineas(
+      submit('m1', [linea('l1', 'PAELLA', 1)], camarero: 'Ana', comensales: 4),
+    );
+    await f.sala.aceptarLineas(
+      submit('m1', [
+        linea('l2', 'FLAN', 1, catalogo: catalogoConSubfamilias()),
+      ], camarero: 'Luis'),
+    );
+    await settle();
+
+    final comandas = printer.jobs.where((j) => j.endpoint == cocina).toList();
+    expect(comandas, hasLength(2));
+    expect(comandas.first.description, 'Comanda Nº 1 · Mesa 1 · cocina');
+    expect(comandas.last.description, 'Comanda Nº 2 · Mesa 1 · cocina');
+    final primera = decodeEscPos(comandas.first.bytes).texts;
+    expect(primera.join('|'), startsWith('COCINA'));
+    expect(primera, contains(startsWith('COMANDA Nº 1 · ')));
+    expect(primera.take(3), ['COCINA', 'Mesa 1', 'Salón']);
+    expect(primera, contains(endsWith('4 comensales')));
+    expect(primera, contains(startsWith('Camarero: Ana')));
+    expect(primera, contains(startsWith('1º envío de la mesa')));
+    final segunda = textoDe(comandas.last.bytes);
+    expect(segunda, contains('COMANDA Nº 2 · '));
+    expect(segunda, contains('Luis'), reason: 'el camarero de ese envío');
+    expect(segunda, contains('Flan'));
+    expect(segunda, isNot(contains('Paella')));
+  });
+
   test('sin impresora de barra las líneas de barra salen por cocina', () async {
     service.configurar(settings: ImpresionSettings(cocina: cocina));
     await f.sala.aceptarLineas(
@@ -115,6 +179,7 @@ void main() {
       runner: runner,
       settings: ImpresionSettings(cocina: cocina, barra: barra),
       nombreTpv: 'Barra',
+      store: f.store,
       printer: otraImpresora,
       now: f.clock.call,
     );
@@ -138,7 +203,8 @@ void main() {
     expect(avisos.single.detalle, contains('isolate caído'));
   });
 
-  test('al cobrar imprime el ticket con cajón para efectivo', () async {
+  test('al cobrar imprime el documento provisional con cajón para '
+      'efectivo', () async {
     await f.sala.aceptarLineas(submit('m1', [linea('l1', 'CANA', 7)]));
     await settle();
     printer.jobs.clear();
@@ -151,14 +217,18 @@ void main() {
 
     final job = printer.jobs.single;
     expect(job.endpoint, tickets);
-    expect(job.description, 'Ticket 1');
+    expect(job.description, 'Ticket 1 · provisional');
     final texto = textoDe(job.bytes);
     expect(texto, contains('Bar Manolo'));
-    expect(texto, contains('TICKET'));
+    expect(texto, contains('DOCUMENTO PROVISIONAL'));
     expect(texto, contains('6,65'));
     expect(texto, contains('3,35'));
-    expect(texto, contains(ticket.claveFactura));
+    expect(texto, contains(referenciaCorta(ticket)));
     expect(abreCajon(job.bytes), isTrue);
+    expect(
+      f.store.snapshot.ticketPorId(ticket.id)!.impresion.provisionalEn,
+      isNotNull,
+    );
   });
 
   test('cobro mixto: ticket con el desglose, cambio sobre el efectivo y '
@@ -199,7 +269,7 @@ void main() {
 
     // La reimpresión lleva el mismo desglose y nunca abre el cajón.
     printer.jobs.clear();
-    await service.imprimirTicket(ticket, reimpresion: true);
+    await service.reimprimirProvisional(ticket.id);
     await service.idle();
     final copia = textoDe(printer.jobs.single.bytes);
     expect(copia, contains('Mixto'));
@@ -228,7 +298,7 @@ void main() {
     expect(abreCajon(printer.jobs.single.bytes), isFalse);
   });
 
-  test('pago único: mismos bytes que sin desglose', () async {
+  test('pago único: los bytes de un TicketPrintData escrito a mano', () async {
     await f.sala.aceptarLineas(submit('m1', [linea('l1', 'CANA', 7)]));
     await settle();
     printer.jobs.clear();
@@ -240,19 +310,21 @@ void main() {
     await settle();
     final esperado = generarTicket(
       TicketPrintData(
-        empresa: const EmpresaTicket(nombre: 'Bar Manolo', cifnif: 'B12345678'),
-        tituloDocumento: 'TICKET',
-        numero2: ticket.claveFactura,
+        empresa: _empresa,
+        tituloDocumento: 'DOCUMENTO PROVISIONAL',
+        provisional: true,
+        numeroLocal: 1,
+        numero2: referenciaCorta(ticket),
         fechaHora: ticket.fechaHora,
-        mesa: ticket.nombreMesa,
-        lineas: [
-          for (final l in ticket.lineas)
-            LineaTicket(
-              descripcion: l.descripcion,
-              cantidad: l.cantidad,
-              pvpUnitarioCents: l.pvpUnitarioCents,
-              importeCents: l.importeCents,
-            ),
+        mesa: 'Mesa 1',
+        zona: 'Salón',
+        lineas: const [
+          LineaTicket(
+            descripcion: 'Caña',
+            cantidad: 7,
+            pvpUnitarioCents: 95,
+            importeCents: 665,
+          ),
         ],
         desglose: const [
           DesgloseIvaTicketPrint(ivaPct: 10, baseCents: 605, cuotaCents: 60),
@@ -261,34 +333,159 @@ void main() {
         metodoPago: 'Efectivo',
         entregadoCents: 1000,
         cambioCents: 335,
+        ivaIncluido: true,
         abrirCajon: true,
       ),
     );
     expect(printer.jobs.single.bytes, esperado);
   });
 
-  test(
-    'reimprimir con factura muestra el código y la marca de copia',
-    () async {
-      await f.sala.aceptarLineas(submit('m1', [linea('l1', 'CANA', 1)]));
-      final ticket = await f.sala.cobrar('m1', MetodoPago.tarjeta);
-      await settle();
-      printer.jobs.clear();
-      final facturado = ticket.conFactura(
-        FacturaSincronizada(
-          estado: EstadoSincronizacion.sincronizado,
-          codigo: 'F2026S9',
+  test('las líneas iguales salen juntas y las notas solo con '
+      'mostrarNotas', () async {
+    await f.sala.aceptarLineas(
+      submit('m1', [linea('l1', 'CANA', 2, nota: 'con limón')]),
+    );
+    await f.sala.aceptarLineas(submit('m1', [linea('l2', 'CANA', 3)]));
+    await settle();
+    printer.jobs.clear();
+    await f.sala.cobrar('m1', MetodoPago.tarjeta);
+    await settle();
+    var texto = textoDe(printer.jobs.single.bytes);
+    // Sin mostrarNotas, la nota no cuenta: una sola línea de 5 cañas.
+    expect(texto, contains('5 x Caña'));
+    expect(texto, isNot(contains('con limón')));
+
+    service.configurar(
+      settings: ajustes(
+        formato: const FormatoImpresion(
+          ticket: FormatoTicket(mostrarNotas: true),
         ),
-      );
-      await service.imprimirTicket(facturado, reimpresion: true);
-      await service.idle();
-      final texto = textoDe(printer.jobs.single.bytes);
-      expect(texto, contains('FACTURA SIMPLIFICADA'));
-      expect(texto, contains('F2026S9'));
-      expect(texto, contains('COPIA'));
-      expect(abreCajon(printer.jobs.single.bytes), isFalse);
-    },
-  );
+      ),
+    );
+    await f.sala.aceptarLineas(
+      submit('m2', [
+        linea('l3', 'CANA', 2, nota: 'con limón'),
+        linea('l4', 'CANA', 3),
+        linea('l5', 'CANA', 1, nota: ' con limón '),
+      ]),
+    );
+    await settle();
+    printer.jobs.clear();
+    await f.sala.cobrar('m2', MetodoPago.tarjeta);
+    await settle();
+    texto = textoDe(printer.jobs.single.bytes);
+    expect(texto, contains('con limón'));
+    expect(texto, contains('3 x Caña'), reason: 'las dos con la misma nota');
+    expect(texto, isNot(contains('6 x Caña')));
+  });
+
+  test('la factura se imprime ORIGINAL la primera vez y DUPLICADO las '
+      'siguientes', () async {
+    await f.sala.aceptarLineas(submit('m1', [linea('l1', 'CANA', 1)]));
+    final ticket = await f.sala.cobrar('m1', MetodoPago.tarjeta);
+    await settle();
+    printer.jobs.clear();
+    await sincronizar(ticket.id);
+
+    await service.imprimirFactura(ticket.id);
+    await service.idle();
+    final original = printer.jobs.single;
+    expect(original.description, 'Factura F2026S9 (original)');
+    final texto = textoDe(original.bytes);
+    expect(texto, contains('FACTURA SIMPLIFICADA'));
+    expect(texto, contains('F2026S9'));
+    expect(texto, isNot(contains('COPIA')));
+    expect(texto, isNot(contains('DUPLICADO')));
+    expect(abreCajon(original.bytes), isFalse);
+
+    printer.jobs.clear();
+    await service.imprimirFactura(ticket.id);
+    await service.idle();
+    expect(printer.jobs.single.description, 'Factura F2026S9 (duplicado 1)');
+    expect(textoDe(printer.jobs.single.bytes), contains('DUPLICADO'));
+    final impresion = f.store.snapshot.ticketPorId(ticket.id)!.impresion;
+    expect(impresion.originalImpreso, isTrue);
+    expect(impresion.duplicados, 1);
+  });
+
+  test('imprimirDocumentoTicket y la vista previa: la factura si se puede y, '
+      'si no, el provisional', () async {
+    await f.sala.aceptarLineas(submit('m1', [linea('l1', 'CANA', 1)]));
+    final ticket = await f.sala.cobrar('m1', MetodoPago.tarjeta);
+    await settle();
+    printer.jobs.clear();
+
+    // Sin factura de FS: copia del provisional.
+    expect(
+      textoDe(await service.vistaPreviaTicket(ticket.id)),
+      contains('COPIA'),
+    );
+    await service.imprimirDocumentoTicket(ticket.id);
+    await service.idle();
+    expect(printer.jobs.single.description, 'Ticket 1 · provisional (copia)');
+
+    await sincronizar(ticket.id);
+    expect(
+      textoDe(await service.vistaPreviaTicket(ticket.id)),
+      contains('FACTURA SIMPLIFICADA'),
+    );
+    printer.jobs.clear();
+    await service.imprimirDocumentoTicket(ticket.id);
+    await service.idle();
+    expect(printer.jobs.single.description, 'Factura F2026S9 (original)');
+
+    expect(
+      () => service.imprimirDocumentoTicket('nope'),
+      throwsA(isA<ValidationException>()),
+    );
+  });
+
+  test('sin NIF del emisor la factura no se imprime', () async {
+    service.configurar(empresa: const EmpresaTicket(nombre: 'Bar Manolo'));
+    expect(service.cabeceraFiscalCompleta, isFalse);
+    await f.sala.aceptarLineas(submit('m1', [linea('l1', 'CANA', 1)]));
+    final ticket = await f.sala.cobrar('m1', MetodoPago.tarjeta);
+    await settle();
+    await sincronizar(ticket.id);
+    await expectLater(
+      service.imprimirFactura(ticket.id),
+      throwsA(
+        isA<ValidationException>().having(
+          (e) => e.message,
+          'message',
+          contains('NIF'),
+        ),
+      ),
+    );
+  });
+
+  test('la empresa del ERP compone la cabecera si los ajustes no la '
+      'fijan', () async {
+    final sinAjustes = PrintingService(
+      alerts: f.alerts,
+      runner: const InlineIsolateRunner(),
+      settings: ImpresionSettings(tickets: tickets),
+      nombreTpv: 'Barra',
+      store: f.store,
+      printer: printer,
+      now: f.clock.call,
+    );
+    expect(sinAjustes.cabeceraFiscalCompleta, isFalse);
+    sinAjustes.configurar(
+      empresaErp: EmpresaEmisora(
+        nombre: 'Hostelería Manolo SL',
+        cifnif: 'B87654321',
+        obtenidaEn: f.clock(),
+      ),
+    );
+    expect(sinAjustes.cabeceraFiscalCompleta, isTrue);
+    await f.sala.aceptarLineas(submit('m1', [linea('l1', 'CANA', 1)]));
+    final ticket = await f.sala.cobrar('m1', MetodoPago.tarjeta);
+    await settle();
+    final texto = textoDe(await sinAjustes.vistaPreviaTicket(ticket.id));
+    expect(texto, contains('Hostelería Manolo SL'));
+    expect(texto, contains('B87654321'));
+  });
 
   test(
     'desactivar imprimirTicketAlCobrar o no tener impresora no imprime',
@@ -306,76 +503,287 @@ void main() {
 
       service.configurar(settings: const ImpresionSettings());
       expect(service.disponible, isFalse);
+      expect(service.hayImpresoraTickets, isFalse);
       await f.sala.aceptarLineas(submit('m2', [linea('l2', 'CANA', 1)]));
       final ticket = await f.sala.cobrar('m2', MetodoPago.tarjeta);
       await settle();
       expect(printer.jobs, isEmpty);
       expect(
-        () => service.imprimirTicket(ticket, reimpresion: true),
+        () => service.reimprimirProvisional(ticket.id),
         throwsA(isA<PrinterException>()),
       );
     },
   );
 
-  test(
-    'precuenta: documento propio sin validez fiscal, sin clave ni cajón',
-    () async {
-      await f.sala.aceptarLineas(
-        submit('m1', [
-          linea('l1', 'CANA', 7),
-          linea('l2', 'PAELLA', 1),
-        ], camarero: 'Ana'),
-      );
-      await settle();
-      await f.sala.anularLinea('m1', 'l2');
-      await settle(); // el aviso de anulación a cocina
-      printer.jobs.clear();
-      final comanda = f.sala.comandaDeMesa('m1')!;
-      final totales = f.sala.calcularTotales(comanda.lineasActivas.toList());
+  test('sin cola de impresión el cobro no espera ni imprime, aunque haya '
+      'impresora en los ajustes', () async {
+    final sinCola = PrintingService(
+      alerts: f.alerts,
+      runner: const InlineIsolateRunner(),
+      settings: ImpresionSettings(
+        tickets: tickets,
+        abrirCajonEfectivo: true,
+        formato: const FormatoImpresion(
+          emision: EmisionTicket(
+            modo: ModoEmision.facturaAlCobrar,
+            esperaSegundos: 30,
+          ),
+        ),
+      ),
+      nombreTpv: 'Barra',
+      store: f.store,
+      now: f.clock.call,
+    );
+    expect(sinCola.hayImpresoraTickets, isFalse);
+    final pendientes = <Set<String>>[];
+    final sub = sinCola.emisionesPendientes.listen(pendientes.add);
+    addTearDown(sub.cancel);
+    f.sala.addEffects(sinCola);
+    service.configurar(settings: const ImpresionSettings());
+    await f.sala.aceptarLineas(submit('m1', [linea('l1', 'CANA', 1)]));
+    final ticket = await f.sala.cobrar(
+      'm1',
+      MetodoPago.efectivo,
+      entregadoCents: 100,
+    );
+    expect(sinCola.emisionPendiente(ticket.id), isFalse);
+    // Sin la espera de la factura, los efectos terminan enseguida.
+    await f.sala.idle().timeout(const Duration(seconds: 5));
+    expect(pendientes, [<String>{}]);
+    expect(
+      f.store.snapshot.ticketPorId(ticket.id)!.impresion.provisionalEn,
+      isNull,
+    );
+  });
 
-      await service.imprimirPrecuenta(f.sala.mesa('m1')!, comanda, totales);
-      await service.idle();
-
-      final job = printer.jobs.single;
-      expect(job.endpoint, tickets);
-      expect(job.description, 'Precuenta Mesa 1');
-      final texto = textoDe(job.bytes);
-      expect(texto, contains('PRECUENTA'));
-      expect(texto, contains('DOCUMENTO SIN VALIDEZ FISCAL'));
-      expect(texto, contains('Ana'));
-      expect(texto, contains('6,65'));
-      expect(texto, isNot(contains('Paella')));
-      expect(texto, isNot(contains('TICKET')));
-      expect(texto, isNot(contains('Forma de pago')));
-      expect(texto, isNot(contains('TPV-')));
-      expect(abreCajon(job.bytes), isFalse);
-      // Imprimirla no cobra la mesa ni crea tickets.
-      expect(f.sala.comandaDeMesa('m1'), isNotNull);
-      expect(f.store.snapshot.ticketsTurno, isEmpty);
-    },
-  );
-
-  test('precuenta sin impresora de tickets o sin líneas avisa', () async {
+  test('con «Emitir factura al cobrar» el ticket queda pendiente hasta que '
+      'llega la factura o se cancelan las esperas', () async {
+    service.configurar(
+      settings: ajustes(
+        abrirCajon: false,
+        formato: const FormatoImpresion(
+          emision: EmisionTicket(
+            modo: ModoEmision.facturaAlCobrar,
+            esperaSegundos: 30,
+          ),
+        ),
+      ),
+    );
+    final pendientes = <Set<String>>[];
+    final sub = service.emisionesPendientes.listen(pendientes.add);
+    addTearDown(sub.cancel);
     await f.sala.aceptarLineas(submit('m1', [linea('l1', 'CANA', 1)]));
     await settle();
-    final mesa = f.sala.mesa('m1')!;
-    final comanda = f.sala.comandaDeMesa('m1')!;
-    final totales = f.sala.calcularTotales(comanda.lineasActivas.toList());
+    printer.jobs.clear();
+    final ticket = await f.sala.cobrar('m1', MetodoPago.tarjeta);
+    expect(service.emisionPendiente(ticket.id), isTrue);
 
-    final vacia = comanda.conLineaActualizada(
-      comanda.lineaPorId('l1')!.anular(cuando: f.clock()),
+    service.cancelarEsperas();
+    await settle();
+    await Future<void>.delayed(Duration.zero);
+    expect(service.emisionPendiente(ticket.id), isFalse);
+    expect(pendientes.first, isEmpty);
+    expect(pendientes.where((p) => p.contains(ticket.id)), isNotEmpty);
+    expect(pendientes.last, isEmpty);
+    // Sin factura a tiempo: el provisional, sin cajón.
+    expect(printer.jobs.single.description, 'Ticket 1 · provisional');
+  });
+
+  test('precuenta: documento propio sin validez fiscal, sin clave ni '
+      'cajón', () async {
+    await f.sala.aceptarLineas(
+      submit('m1', [
+        linea('l1', 'CANA', 7),
+        linea('l2', 'PAELLA', 1),
+      ], camarero: 'Ana'),
     );
+    await settle();
+    await f.sala.anularLinea('m1', 'l2');
+    await settle(); // el aviso de anulación a cocina
+    printer.jobs.clear();
+
+    final precuenta = await f.sala.emitirPrecuenta('m1', emitidaPor: 'Ana');
+    await service.imprimirPrecuenta(precuenta, zona: 'Terraza');
+    await service.idle();
+
+    final job = printer.jobs.single;
+    expect(job.endpoint, tickets);
+    expect(job.description, 'Precuenta nº 1 · Mesa 1');
+    final texto = textoDe(job.bytes);
+    expect(texto, contains('PRECUENTA Nº 1'));
+    expect(texto, contains('DOCUMENTO SIN VALIDEZ FISCAL'));
+    expect(texto, contains('Ana'));
+    expect(texto, contains('Terraza'));
+    expect(texto, contains('6,65'));
+    expect(texto, isNot(contains('Paella')));
+    expect(texto, isNot(contains('PROVISIONAL')));
+    expect(texto, isNot(contains('Forma de pago')));
+    expect(texto, isNot(contains('TPV-')));
+    expect(abreCajon(job.bytes), isFalse);
+    // Imprimirla no cobra la mesa ni crea tickets.
+    expect(f.sala.comandaDeMesa('m1'), isNotNull);
+    expect(f.store.snapshot.ticketsTurno, isEmpty);
+  });
+
+  test('precuenta sin líneas o sin impresora de tickets avisa', () async {
+    await f.sala.aceptarLineas(submit('m1', [linea('l1', 'CANA', 1)]));
+    await settle();
+    final precuenta = await f.sala.emitirPrecuenta('m1');
+
+    await f.sala.anularLinea('m1', 'l1');
     expect(
-      () => service.imprimirPrecuenta(mesa, vacia, totales),
+      () => f.sala.emitirPrecuenta('m1'),
       throwsA(isA<ValidationException>()),
     );
 
     // Sin impresora de tickets se usa la de cocina; sin ninguna, error.
     service.configurar(settings: const ImpresionSettings());
     expect(
-      () => service.imprimirPrecuenta(mesa, comanda, totales),
+      () => service.imprimirPrecuenta(precuenta),
       throwsA(isA<PrinterException>()),
     );
+  });
+
+  test('abrir el cajón a mano', () async {
+    await service.abrirCajon();
+    await service.idle();
+    expect(printer.jobs.single.description, 'Cajón · apertura manual');
+    expect(printer.jobs.single.endpoint, tickets);
+    expect(abreCajon(printer.jobs.single.bytes), isTrue);
+
+    service.configurar(settings: const ImpresionSettings());
+    expect(service.abrirCajon, throwsA(isA<PrinterException>()));
+  });
+
+  test('marchar un pase imprime el MARCHAR en el puesto de sus '
+      'líneas', () async {
+    await f.sala.aceptarLineas(
+      submit('m1', [
+        linea('l1', 'PAELLA', 1, pase: 2),
+        linea('l2', 'FLAN', 1, pase: 3, catalogo: catalogoConSubfamilias()),
+      ]),
+    );
+    await settle();
+    printer.jobs.clear();
+    await f.sala.marcharPase('m1', 2, marchaId: 'marcha-1', camarero: 'Ana');
+    await settle();
+    final job = printer.jobs.single;
+    expect(job.endpoint, cocina);
+    expect(job.description, startsWith('Marchar '));
+    expect(job.description, endsWith(' · Mesa 1 · cocina'));
+    final texto = textoDe(job.bytes);
+    expect(texto, contains('Paella'));
+    expect(texto, isNot(contains('Flan')));
+  });
+
+  test('reimprimir la comanda delega con la banda del motivo', () async {
+    await f.sala.aceptarLineas(
+      submit('m1', [linea('l1', 'PAELLA', 1), linea('l2', 'CANA', 1)]),
+    );
+    await settle();
+    printer.jobs.clear();
+    await service.reimprimirComanda(
+      f.sala.mesa('m1')!,
+      f.sala.comandaDeMesa('m1')!,
+      destinos: {DestinoPreparacion.cocina},
+      alcance: AlcanceReimpresion.todo,
+      motivo: MotivoReimpresion.noSalio,
+      dispositivo: 'Caja 1',
+    );
+    await service.idle();
+    final job = printer.jobs.single;
+    expect(job.description, 'Reimpresión de comanda · Mesa 1 · cocina');
+    expect(textoDe(job.bytes), contains('REIMPRESIÓN · PREPARAR'));
+
+    expect(
+      () => service.reimprimirComanda(
+        f.sala.mesa('m1')!,
+        f.sala.comandaDeMesa('m1')!,
+        destinos: const {},
+        alcance: AlcanceReimpresion.todo,
+        motivo: MotivoReimpresion.copia,
+        dispositivo: 'Caja 1',
+      ),
+      throwsA(isA<ValidationException>()),
+    );
+  });
+
+  test('muestras: en la impresora del rol con el perfil del borrador; sin '
+      'impresora, error', () async {
+    final borrador = ImpresionSettings(
+      cocina: cocina,
+      tickets: tickets,
+      formato: const FormatoImpresion(
+        perfiles: {RolImpresora.cocina: PerfilImpresora(copias: 2)},
+      ),
+    );
+    await service.imprimirMuestra(
+      DocumentoMuestra.provisional,
+      ajustes: borrador,
+      rol: RolImpresora.tickets,
+    );
+    await service.imprimirMuestra(
+      DocumentoMuestra.comandaBarra,
+      ajustes: borrador,
+      rol: RolImpresora.barra,
+    );
+    await service.idle();
+    expect(printer.jobs.map((j) => j.endpoint), [tickets, cocina]);
+    expect(printer.jobs.first.description, startsWith('Muestra · '));
+    expect(textoDe(printer.jobs.first.bytes), contains('Bar Manolo'));
+    expect(textoDe(printer.jobs.first.bytes), contains('MUESTRA'));
+    // La barra sale por la de cocina, con las dos copias de su perfil.
+    final barraTextos = decodeEscPos(printer.jobs.last.bytes).texts;
+    expect(barraTextos.where((t) => t.startsWith('BARRA')), hasLength(2));
+
+    await expectLater(
+      service.imprimirMuestra(
+        DocumentoMuestra.comandaCocina,
+        ajustes: ImpresionSettings(tickets: tickets),
+        rol: RolImpresora.cocina,
+      ),
+      throwsA(isA<PrinterException>()),
+    );
+  });
+
+  test('muestras: la cabecera sale del formato del borrador, no del '
+      'vigente', () async {
+    // Sin empresa fija en los ajustes, la cabecera la compone el formato.
+    final sinEmpresaFija = PrintingService(
+      alerts: f.alerts,
+      runner: const InlineIsolateRunner(),
+      settings: ImpresionSettings(
+        tickets: tickets,
+        formato: const FormatoImpresion(
+          ticket: FormatoTicket(nombreComercial: 'Casa Vigente'),
+        ),
+      ),
+      nombreTpv: 'Barra',
+      store: f.store,
+      printer: printer,
+      now: f.clock.call,
+    );
+    await sinEmpresaFija.imprimirMuestra(
+      DocumentoMuestra.provisional,
+      ajustes: ImpresionSettings(
+        tickets: tickets,
+        formato: const FormatoImpresion(
+          ticket: FormatoTicket(nombreComercial: 'Taberna Borrador'),
+        ),
+      ),
+      rol: RolImpresora.tickets,
+    );
+    await sinEmpresaFija.idle();
+    final texto = textoDe(printer.jobs.single.bytes);
+    expect(texto, contains('Taberna Borrador'));
+    expect(texto, isNot(contains('Casa Vigente')));
+  });
+
+  test('los textos de puesto y forma de pago son los del mapeo', () {
+    expect(PrintingService.tituloPuesto(DestinoPreparacion.cocina), 'COCINA');
+    expect(PrintingService.tituloPuesto(DestinoPreparacion.barra), 'BARRA');
+    expect(PrintingService.formaDePago(MetodoPago.efectivo), 'Efectivo');
+    expect(PrintingService.formaDePago(MetodoPago.tarjeta), 'Tarjeta');
   });
 
   test('un fallo de la impresora se convierte en aviso', () async {
@@ -486,9 +894,10 @@ void main() {
       final job = printer.jobs.single;
       expect(job.endpoint, barra);
       expect(job.description, 'Anulación Mesa 1 · barra');
-      final texto = textoDe(job.bytes);
+      final texto = textoDe(job.bytes).trimLeft();
       expect(texto, startsWith('ANULACIÓN BARRA'));
-      expect(texto, contains('** ANULADA **'));
+      expect(_primeraLineaEnInverso(job.bytes), isTrue);
+      expect(texto, contains('-2 x Caña'));
       expect(texto, contains('Caña'));
       expect(texto, contains('Motivo: se equivocó'));
       expect(texto, isNot(contains('Paella')));
@@ -514,13 +923,15 @@ void main() {
       await settle();
       expect(printer.jobs, hasLength(2));
       final porEndpoint = {for (final j in printer.jobs) j.endpoint: j};
-      final textoCocina = textoDe(porEndpoint[cocina]!.bytes);
+      final textoCocina = textoDe(porEndpoint[cocina]!.bytes).trimLeft();
       expect(textoCocina, startsWith('ANULACIÓN COCINA'));
+      expect(_primeraLineaEnInverso(porEndpoint[cocina]!.bytes), isTrue);
       expect(textoCocina, contains('Paella'));
       expect(textoCocina, contains('Flan'));
       expect(textoCocina, contains('Motivo: mesa vaciada'));
-      final textoBarra = textoDe(porEndpoint[barra]!.bytes);
+      final textoBarra = textoDe(porEndpoint[barra]!.bytes).trimLeft();
       expect(textoBarra, startsWith('ANULACIÓN BARRA'));
+      expect(_primeraLineaEnInverso(porEndpoint[barra]!.bytes), isTrue);
       expect(textoBarra, contains('Caña'));
     });
 
@@ -541,7 +952,30 @@ void main() {
       expect(printer.jobs, isEmpty);
     });
   });
+
+  test('los pases de los ajustes ordenan la comanda por pase', () async {
+    service.configurar(
+      settings: ajustes(
+        formato: const FormatoImpresion(pases: PasesConfig(activos: true)),
+      ),
+    );
+    await f.sala.aceptarLineas(
+      submit('m1', [
+        linea('l1', 'FLAN', 1, pase: 3, catalogo: catalogoConSubfamilias()),
+        linea('l2', 'PAELLA', 1, pase: 1),
+      ]),
+    );
+    await settle();
+    final texto = textoDe(printer.jobs.single.bytes);
+    expect(texto.indexOf('Paella'), lessThan(texto.indexOf('Flan')));
+  });
 }
+
+/// La primera línea con texto del documento va en inverso.
+bool _primeraLineaEnInverso(Uint8List bytes) =>
+    decodeEscPos(bytes).lines
+        .firstWhere((linea) => linea.text.trim().isNotEmpty)
+        .inverse;
 
 /// Runner que lanza un error no tipado (como un `IsolateSpawnException`) en
 /// la primera llamada y ejecuta en línea las siguientes.

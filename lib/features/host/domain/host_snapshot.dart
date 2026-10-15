@@ -3,9 +3,12 @@ import 'package:equatable/equatable.dart';
 import '../../../core/facturascripts/catalog/catalog_models.dart';
 import '../../../core/inventory/inventory_models.dart';
 import '../../../core/utils/json_map.dart';
+import '../../../core/utils/json_tolerante.dart';
 import '../../sala/domain/comanda.dart';
 import '../../sala/domain/mesa.dart';
+import '../../sala/domain/precuenta_emitida.dart';
 import '../../sala/domain/ticket.dart';
+import 'empresa_emisora.dart';
 import 'sync_job.dart';
 
 /// Turno de caja abierto.
@@ -50,8 +53,12 @@ final class CierreAbierto extends Equatable {
 }
 
 /// Resumen archivado de un Cierre Z.
+///
+/// [precuentasSinCobro] es posterior a la primera versión del diario: se lee
+/// de forma tolerante y solo se escribe si no está vacía, de modo que un
+/// cierre antiguo se reescribe igual.
 final class ResumenCierre extends Equatable {
-  const ResumenCierre({
+  ResumenCierre({
     required this.id,
     required this.abiertoEn,
     required this.cerradoEn,
@@ -68,7 +75,8 @@ final class ResumenCierre extends Equatable {
     required this.descuadreCents,
     this.documentoAsiento,
     this.asientoEncolado = false,
-  });
+    List<PrecuentaSinCobro> precuentasSinCobro = const [],
+  }) : precuentasSinCobro = List.unmodifiable(precuentasSinCobro);
 
   factory ResumenCierre.fromJson(Map<String, Object?> json) => ResumenCierre(
     id: json.requireString('id'),
@@ -87,6 +95,12 @@ final class ResumenCierre extends Equatable {
     descuadreCents: json.requireInt('descuadreCents'),
     documentoAsiento: json.optionalString('documentoAsiento'),
     asientoEncolado: json.optionalBool('asientoEncolado') ?? false,
+    // Una lista ausente o ilegible se lee vacía y un elemento ilegible se
+    // descarta: nunca invalidan el cierre archivado.
+    precuentasSinCobro: listaTolerante(
+      json['precuentasSinCobro'],
+      PrecuentaSinCobro.fromJson,
+    ),
   );
 
   final String id;
@@ -112,6 +126,32 @@ final class ResumenCierre extends Equatable {
   final String? documentoAsiento;
   final bool asientoEncolado;
 
+  /// Precuentas de las mesas vaciadas sin cobrar durante el turno cerrado
+  /// (el Cierre Z las toma de `HostSnapshot.precuentasSinCobro`).
+  final List<PrecuentaSinCobro> precuentasSinCobro;
+
+  ResumenCierre copyWith({List<PrecuentaSinCobro>? precuentasSinCobro}) =>
+      ResumenCierre(
+        id: id,
+        abiertoEn: abiertoEn,
+        cerradoEn: cerradoEn,
+        numTickets: numTickets,
+        numAnulados: numAnulados,
+        ventasTotalCents: ventasTotalCents,
+        ventasEfectivoCents: ventasEfectivoCents,
+        ventasTarjetaCents: ventasTarjetaCents,
+        numTicketsMixtos: numTicketsMixtos,
+        fondoCajaCents: fondoCajaCents,
+        retiradasCents: retiradasCents,
+        efectivoEsperadoCents: efectivoEsperadoCents,
+        efectivoContadoCents: efectivoContadoCents,
+        descuadreCents: descuadreCents,
+        documentoAsiento: documentoAsiento,
+        asientoEncolado: asientoEncolado,
+        precuentasSinCobro: precuentasSinCobro ?? this.precuentasSinCobro,
+      );
+
+  /// [precuentasSinCobro] solo si no está vacía.
   Map<String, Object?> toJson() => {
     'id': id,
     'abiertoEn': abiertoEn.toIso8601String(),
@@ -130,6 +170,8 @@ final class ResumenCierre extends Equatable {
     'descuadreCents': descuadreCents,
     if (documentoAsiento != null) 'documentoAsiento': documentoAsiento,
     'asientoEncolado': asientoEncolado,
+    if (precuentasSinCobro.isNotEmpty)
+      'precuentasSinCobro': [for (final p in precuentasSinCobro) p.toJson()],
   };
 
   @override
@@ -150,6 +192,7 @@ final class ResumenCierre extends Equatable {
     descuadreCents,
     documentoAsiento,
     asientoEncolado,
+    precuentasSinCobro,
   ];
 }
 
@@ -204,16 +247,20 @@ final class HostSnapshot extends Equatable {
     List<Comanda> comandas = const [],
     List<Ticket> ticketsTurno = const [],
     this.numeroLocalSiguiente = 1,
+    this.numeroEnvioSiguiente = 1,
     this.cierreAbierto,
     List<ResumenCierre> historialCierres = const [],
     this.catalogo,
     this.catalogoVersion,
     this.recetas,
+    this.empresa,
+    List<PrecuentaSinCobro> precuentasSinCobro = const [],
     List<SyncJob> cola = const [],
   }) : mesas = List.unmodifiable(mesas),
        comandas = List.unmodifiable(comandas),
        ticketsTurno = List.unmodifiable(ticketsTurno),
        historialCierres = List.unmodifiable(historialCierres),
+       precuentasSinCobro = List.unmodifiable(precuentasSinCobro),
        cola = List.unmodifiable(cola);
 
   /// Lanza [FormatException] si el JSON no tiene la forma esperada.
@@ -230,6 +277,7 @@ final class HostSnapshot extends Equatable {
         Ticket.fromJson(item),
     ],
     numeroLocalSiguiente: json.optionalInt('numeroLocalSiguiente') ?? 1,
+    numeroEnvioSiguiente: _numeroEnvioTolerante(json['numeroEnvioSiguiente']),
     cierreAbierto: switch (json.optionalMap('cierreAbierto')) {
       final Map<String, Object?> map => CierreAbierto.fromJson(map),
       null => null,
@@ -247,6 +295,13 @@ final class HostSnapshot extends Equatable {
       final Map<String, Object?> map => RecetasCache.fromJson(map),
       null => null,
     },
+    empresa: EmpresaEmisora.tolerante(json['empresa']),
+    // Una lista ausente o ilegible se lee vacía y un elemento ilegible se
+    // descarta: nunca invalidan el diario entero.
+    precuentasSinCobro: listaTolerante(
+      json['precuentasSinCobro'],
+      PrecuentaSinCobro.fromJson,
+    ),
     cola: [
       for (final item in json.optionalMapList('cola')) SyncJob.fromJson(item),
     ],
@@ -263,6 +318,10 @@ final class HostSnapshot extends Equatable {
   /// Tickets cobrados desde el último Cierre Z.
   final List<Ticket> ticketsTurno;
   final int numeroLocalSiguiente;
+
+  /// Número del siguiente envío a cocina/barra del turno. Lo asigna el host
+  /// al aceptar líneas y el Cierre Z lo devuelve a 1.
+  final int numeroEnvioSiguiente;
   final CierreAbierto? cierreAbierto;
 
   /// Últimos cierres, del más reciente al más antiguo.
@@ -272,6 +331,15 @@ final class HostSnapshot extends Equatable {
   /// Hash del contenido del catálogo; cambia solo si cambia el catálogo.
   final String? catalogoVersion;
   final RecetasCache? recetas;
+
+  /// Última identidad fiscal buena leída del ERP, para imprimir la cabecera
+  /// de los tickets aunque el ERP no responda.
+  final EmpresaEmisora? empresa;
+
+  /// Precuentas de las mesas vaciadas sin cobrar desde el último Cierre Z,
+  /// en orden de vaciado. El Cierre Z las archiva en su [ResumenCierre] y
+  /// las vacía.
+  final List<PrecuentaSinCobro> precuentasSinCobro;
 
   /// Cola de sincronización en orden de creación.
   final List<SyncJob> cola;
@@ -309,23 +377,29 @@ final class HostSnapshot extends Equatable {
     List<Comanda>? comandas,
     List<Ticket>? ticketsTurno,
     int? numeroLocalSiguiente,
+    int? numeroEnvioSiguiente,
     CierreAbierto? cierreAbierto,
     bool cerrarTurno = false,
     List<ResumenCierre>? historialCierres,
     CatalogSnapshot? catalogo,
     String? catalogoVersion,
     RecetasCache? recetas,
+    EmpresaEmisora? empresa,
+    List<PrecuentaSinCobro>? precuentasSinCobro,
     List<SyncJob>? cola,
   }) => HostSnapshot(
     mesas: mesas ?? this.mesas,
     comandas: comandas ?? this.comandas,
     ticketsTurno: ticketsTurno ?? this.ticketsTurno,
     numeroLocalSiguiente: numeroLocalSiguiente ?? this.numeroLocalSiguiente,
+    numeroEnvioSiguiente: numeroEnvioSiguiente ?? this.numeroEnvioSiguiente,
     cierreAbierto: cerrarTurno ? null : (cierreAbierto ?? this.cierreAbierto),
     historialCierres: historialCierres ?? this.historialCierres,
     catalogo: catalogo ?? this.catalogo,
     catalogoVersion: catalogoVersion ?? this.catalogoVersion,
     recetas: recetas ?? this.recetas,
+    empresa: empresa ?? this.empresa,
+    precuentasSinCobro: precuentasSinCobro ?? this.precuentasSinCobro,
     cola: cola ?? this.cola,
   );
 
@@ -337,6 +411,10 @@ final class HostSnapshot extends Equatable {
       ?comanda,
     ],
   );
+
+  /// Añade al final las precuentas de una mesa vaciada sin cobrar.
+  HostSnapshot conPrecuentasSinCobro(Iterable<PrecuentaSinCobro> nuevas) =>
+      copyWith(precuentasSinCobro: [...precuentasSinCobro, ...nuevas]);
 
   /// Sustituye el trabajo con el mismo id (o lo añade al final).
   HostSnapshot conJob(SyncJob job) =>
@@ -368,11 +446,17 @@ final class HostSnapshot extends Equatable {
     'comandas': [for (final c in comandas) c.toJson()],
     'ticketsTurno': [for (final t in ticketsTurno) t.toJson()],
     'numeroLocalSiguiente': numeroLocalSiguiente,
+    // Los campos nuevos solo se escriben si no tienen su valor por defecto:
+    // un diario antiguo leído y vuelto a escribir sale byte a byte igual.
+    if (numeroEnvioSiguiente != 1) 'numeroEnvioSiguiente': numeroEnvioSiguiente,
     if (cierreAbierto != null) 'cierreAbierto': cierreAbierto!.toJson(),
     'historialCierres': [for (final r in historialCierres) r.toJson()],
     if (catalogo != null) 'catalogo': catalogo!.toJson(),
     if (catalogoVersion != null) 'catalogoVersion': catalogoVersion,
     if (recetas != null) 'recetas': recetas!.toJson(),
+    if (empresa != null) 'empresa': empresa!.toJson(),
+    if (precuentasSinCobro.isNotEmpty)
+      'precuentasSinCobro': [for (final p in precuentasSinCobro) p.toJson()],
     'cola': [for (final j in cola) j.toJson()],
   };
 
@@ -382,14 +466,25 @@ final class HostSnapshot extends Equatable {
     comandas,
     ticketsTurno,
     numeroLocalSiguiente,
+    numeroEnvioSiguiente,
     cierreAbierto,
     historialCierres,
     catalogo,
     catalogoVersion,
     recetas,
+    empresa,
+    precuentasSinCobro,
     cola,
   ];
 }
+
+/// Lectura tolerante de `numeroEnvioSiguiente`: ausente, de otro tipo, cero o
+/// negativo vale 1. Un valor raro en un campo nuevo nunca invalida el diario
+/// entero (a diferencia del `optionalInt` estricto de `numeroLocalSiguiente`).
+int _numeroEnvioTolerante(Object? raw) => switch (raw) {
+  final int n when n > 0 => n,
+  _ => 1,
+};
 
 extension on Map<String, Object?> {
   /// Lista de objetos opcional: ausente equivale a vacía.

@@ -6,11 +6,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
 import '../../../core/errors/app_exception.dart';
+import '../../impresion/domain/formato_impresion.dart';
 import '../data/shared_prefs_settings_repository.dart';
 import '../domain/app_settings.dart';
 import 'pagina_prueba_impresora.dart';
 import 'settings_diagnostics.dart';
 import 'settings_form.dart';
+import 'settings_impresoras.dart';
 import 'settings_providers.dart';
 import 'settings_widgets.dart';
 
@@ -56,7 +58,12 @@ Future<void> cerrarPantallasApiladas(NavigatorState navigator) async {
 /// cambios guardados se aplican en caliente al runtime; en modo comandero
 /// solo se muestran el dispositivo y la red.
 class SettingsPage extends ConsumerStatefulWidget {
-  const SettingsPage({super.key, this.mesasOcupadas, this.onAbrirEnrutamiento});
+  const SettingsPage({
+    super.key,
+    this.mesasOcupadas,
+    this.onAbrirEnrutamiento,
+    this.onAbrirTicketsYComandas,
+  });
 
   /// Ids de las mesas con comanda abierta (las aporta el shell del host).
   /// No se permite guardar una configuración de mesas que las quite.
@@ -66,6 +73,11 @@ class SettingsPage extends ConsumerStatefulWidget {
   /// shell del host: esta feature no depende de `host/`). Si es nulo, no se
   /// muestra el acceso.
   final void Function(BuildContext context)? onAbrirEnrutamiento;
+
+  /// Abre «Tickets y comandas» (papel, copias y avisos por impresora,
+  /// formato del ticket, emisión, QR y pases), igual que
+  /// [onAbrirEnrutamiento]. Si es nulo, no se muestra el acceso.
+  final void Function(BuildContext context)? onAbrirTicketsYComandas;
 
   @override
   ConsumerState<SettingsPage> createState() => _SettingsPageState();
@@ -148,7 +160,6 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   late final _impTickets = _ctrl();
   late final _impCocina = _ctrl();
   late final _impBarra = _ctrl();
-  PaperWidth _paper = PaperWidth.mm80;
   bool _abrirCajon = true;
   bool _imprimirTicket = true;
   bool _imprimirComanda = true;
@@ -227,7 +238,6 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     _impTickets.text = formatImpresora(imp.tickets);
     _impCocina.text = formatImpresora(imp.cocina);
     _impBarra.text = formatImpresora(imp.barra);
-    _paper = imp.paper;
     _abrirCajon = imp.abrirCajon;
     _imprimirTicket = imp.imprimirTicketAlCobrar;
     _imprimirComanda = imp.imprimirComandaCocina;
@@ -354,6 +364,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         modoAsientoZ: _modoAsientoZ,
         subcuentasOverride: _overrides,
       ),
+      // Solo los campos de esta pantalla (un escritor por campo): `paper`
+      // (heredado, sin escritor), `enrutamiento` y `formato` (de sus
+      // pantallas) quedan como estén guardados.
       impresion: s.impresion.copyWith(
         tickets: tickets,
         borrarTickets: tickets == null,
@@ -361,7 +374,6 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         borrarCocina: cocina == null,
         barra: barra,
         borrarBarra: barra == null,
-        paper: _paper,
         abrirCajon: _abrirCajon,
         imprimirTicketAlCobrar: _imprimirTicket,
         imprimirComandaCocina: _imprimirComanda,
@@ -907,13 +919,14 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     });
   }
 
-  Future<void> _imprimirPrueba(
-    String destino,
-    TextEditingController campo,
-  ) async {
+  /// Envía la página de prueba a la dirección escrita para [rol] (aunque no
+  /// esté guardada), por `RawPrinterTransport`: es una prueba de
+  /// conectividad, no pasa por la cola de impresión.
+  Future<void> _imprimirPrueba(RolImpresora rol) async {
+    final destino = rol.etiqueta;
     final PrinterEndpoint? endpoint;
     try {
-      endpoint = parseImpresora(campo.text);
+      endpoint = parseImpresora(_campoImpresora(rol).text);
     } on ValidationException catch (error) {
       _mensaje(error.message, error: true);
       return;
@@ -925,12 +938,13 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     final nombre = _nombreTpv.text.trim().isEmpty
         ? _nombre.text.trim()
         : _nombreTpv.text.trim();
-    await _tarea('imp-$destino', () async {
+    final papel = _papelDePrueba(endpoint);
+    await _tarea('imp-${rol.name}', () async {
       try {
         await _diagnostics.imprimirPrueba(
           endpoint!,
           PaginaPruebaData(
-            paper: _paper,
+            paper: papel,
             destino: destino,
             impresora: formatImpresora(endpoint),
             dispositivo: nombre,
@@ -943,6 +957,36 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       }
     });
   }
+
+  /// Papel de la página de prueba de [endpoint]: el de su perfil, con la
+  /// misma regla que la impresión ([resolverPerfil]). Las direcciones son las
+  /// escritas (un campo ilegible cuenta como vacío); el formato y el papel
+  /// heredado, los guardados en este momento.
+  PaperWidth _papelDePrueba(PrinterEndpoint endpoint) {
+    final impresion =
+        ref.read(appSettingsProvider).value?.impresion ??
+        const PrintingSettings();
+    PrinterEndpoint? legible(RolImpresora rol) {
+      try {
+        return parseImpresora(_campoImpresora(rol).text);
+      } on ValidationException {
+        return null;
+      }
+    }
+
+    return resolverPerfil(
+      endpoint,
+      direcciones: {for (final rol in RolImpresora.values) rol: legible(rol)},
+      formato: impresion.formato,
+      papelHeredado: impresion.paper,
+    ).papel;
+  }
+
+  TextEditingController _campoImpresora(RolImpresora rol) => switch (rol) {
+    RolImpresora.tickets => _impTickets,
+    RolImpresora.cocina => _impCocina,
+    RolImpresora.barra => _impBarra,
+  };
 
   // ---------------------------------------------------------------------------
   // Interfaz
@@ -1024,7 +1068,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                         _seccionErp(),
                         _seccionMysql(),
                         _seccionFiscal(),
-                        _seccionImpresoras(),
+                        _seccionImpresoras(ajustes),
                         _seccionMesas(),
                         _seccionReposicion(),
                         _seccionCaja(),
@@ -1688,123 +1732,47 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 
   // --- Impresoras ---------------------------------------------------------------
 
-  Widget _seccionImpresoras() {
-    return SeccionAjustes(
-      titulo: 'Impresoras',
-      icono: Icons.print_outlined,
-      descripcion:
-          'Impresoras térmicas ESC/POS en red (puerto 9100 por defecto). '
-          'Vacío = sin impresora para ese destino.',
-      children: [
-        _filaImpresora('tickets', 'Tickets', _impTickets),
-        _filaImpresora('cocina', 'Cocina', _impCocina),
-        _filaImpresora('barra', 'Barra', _impBarra),
-        SegmentedButton<PaperWidth>(
-          key: const Key('ajustes-papel'),
-          segments: const [
-            ButtonSegment(value: PaperWidth.mm58, label: Text('Papel 58 mm')),
-            ButtonSegment(value: PaperWidth.mm80, label: Text('Papel 80 mm')),
-          ],
-          selected: {_paper},
-          onSelectionChanged: (s) => _cambiar(() => _paper = s.first),
-        ),
-        _interruptor(
-          clave: 'imprimir-ticket',
-          titulo: 'Imprimir el ticket al cobrar',
-          valor: _imprimirTicket,
-          onChanged: (v) => _imprimirTicket = v,
-        ),
-        _interruptor(
-          clave: 'imprimir-comanda',
-          titulo: 'Imprimir las comandas en cocina/barra',
-          valor: _imprimirComanda,
-          onChanged: (v) => _imprimirComanda = v,
-        ),
-        _interruptor(
-          clave: 'abrir-cajon',
-          titulo: 'Abrir el cajón al cobrar en efectivo',
-          valor: _abrirCajon,
-          onChanged: (v) => _abrirCajon = v,
-        ),
-        if (_rol == DeviceRole.host && widget.onAbrirEnrutamiento != null)
-          _accesoEnrutamiento(widget.onAbrirEnrutamiento!),
-      ],
-    );
-  }
+  Widget _seccionImpresoras(AppSettings ajustes) => SeccionImpresoras(
+    campos: {for (final rol in RolImpresora.values) rol: _campoImpresora(rol)},
+    probando: {
+      for (final rol in RolImpresora.values)
+        if (_ocupado.contains('imp-${rol.name}')) rol,
+    },
+    onProbar: (rol) => unawaited(_imprimirPrueba(rol)),
+    imprimirTicket: _imprimirTicket,
+    onImprimirTicket: (v) => _cambiar(() => _imprimirTicket = v),
+    imprimirComanda: _imprimirComanda,
+    onImprimirComanda: (v) => _cambiar(() => _imprimirComanda = v),
+    abrirCajon: _abrirCajon,
+    onAbrirCajon: (v) => _cambiar(() => _abrirCajon = v),
+    reglasEnrutamiento: ajustes.impresion.enrutamiento.porFamilia.length,
+    onAbrirEnrutamiento: _accesoConAviso(
+      widget.onAbrirEnrutamiento,
+      'el enrutamiento',
+    ),
+    onAbrirTicketsYComandas: _accesoConAviso(
+      widget.onAbrirTicketsYComandas,
+      '«Tickets y comandas»',
+    ),
+  );
 
-  /// Acceso a la pantalla de enrutamiento por familias. Esa pantalla lee las
-  /// impresoras guardadas, así que avisa si hay cambios sin guardar aquí.
-  Widget _accesoEnrutamiento(void Function(BuildContext) abrir) {
-    final reglas = ref
-        .watch(appSettingsProvider)
-        .value
-        ?.impresion
-        .enrutamiento
-        .porFamilia
-        .length;
-    return ListTile(
-      key: const Key('ajustes-enrutamiento'),
-      contentPadding: EdgeInsets.zero,
-      leading: const Icon(Icons.alt_route),
-      title: const Text('Enrutamiento por familias'),
-      subtitle: Text(
-        '${switch (reglas) {
-          null || 0 => 'Todas las familias van al destino por defecto',
-          1 => '1 familia con destino propio',
-          final n => '$n familias con destino propio',
-        }}. Elige qué familias salen por cocina y cuáles por barra.',
-      ),
-      trailing: const Icon(Icons.chevron_right),
-      onTap: () {
-        if (_modificado) {
-          _mensaje(
-            'Guarda antes los cambios de esta pantalla: el enrutamiento usa '
-            'las impresoras guardadas',
-          );
-        }
-        abrir(context);
-      },
-    );
-  }
-
-  Widget _filaImpresora(
-    String clave,
-    String destino,
-    TextEditingController controller,
+  /// Acceso a una pantalla que lee las impresoras guardadas ([pantalla]):
+  /// solo en el host y si el shell aporta [abrir]. Si hay cambios sin
+  /// guardar aquí, avisa antes de abrirla.
+  VoidCallback? _accesoConAviso(
+    void Function(BuildContext context)? abrir,
+    String pantalla,
   ) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Expanded(
-          child: _campo(
-            controller,
-            clave: 'impresora-$clave',
-            etiqueta: 'Impresora de $destino (ip:puerto)',
-            validator: validarImpresora,
-            teclado: TextInputType.url,
-          ),
-        ),
-        const SizedBox(width: 8),
-        Padding(
-          padding: const EdgeInsets.only(top: 4),
-          child: _ocupado.contains('imp-$destino')
-              ? const Padding(
-                  padding: EdgeInsets.all(12),
-                  child: SizedBox.square(
-                    dimension: 24,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-                )
-              : IconButton.outlined(
-                  key: Key('ajustes-prueba-$clave'),
-                  tooltip: 'Ticket de prueba',
-                  icon: const Icon(Icons.receipt),
-                  onPressed: () =>
-                      unawaited(_imprimirPrueba(destino, controller)),
-                ),
-        ),
-      ],
-    );
+    if (abrir == null || _rol != DeviceRole.host) return null;
+    return () {
+      if (_modificado) {
+        _mensaje(
+          'Guarda antes los cambios de esta pantalla: $pantalla usa las '
+          'impresoras guardadas',
+        );
+      }
+      abrir(context);
+    };
   }
 
   // --- Mesas --------------------------------------------------------------------

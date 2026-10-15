@@ -12,6 +12,7 @@ final class OperationalAlert extends Equatable {
     required this.cuando,
     this.detalle,
     this.origen,
+    this.trabajoImpresion,
   });
 
   final AlertaNivel nivel;
@@ -24,8 +25,19 @@ final class OperationalAlert extends Equatable {
   final String? origen;
   final DateTime cuando;
 
+  /// Id del trabajo de la cola de impresión que falló, en los avisos
+  /// «Fallo de impresión»: la interfaz ofrece «Reintentar» con él.
+  final String? trabajoImpresion;
+
   @override
-  List<Object?> get props => [nivel, titulo, detalle, origen, cuando];
+  List<Object?> get props => [
+    nivel,
+    titulo,
+    detalle,
+    origen,
+    cuando,
+    trabajoImpresion,
+  ];
 
   @override
   String toString() =>

@@ -38,6 +38,8 @@ final class ComanderoSalaException extends RemoteRequestException {
     SalaErrorCodes.lineaDesconocida,
     SalaErrorCodes.articuloDesconocido,
     SalaErrorCodes.comandaCerrada,
+    SalaErrorCodes.paseNoValido,
+    SalaErrorCodes.paseSinLineas,
   }.contains(code);
 
   /// Mesa afectada, si la operación la tenía.
@@ -48,6 +50,13 @@ final class ComanderoSalaException extends RemoteRequestException {
   bool get lineaDesconocida => code == SalaErrorCodes.lineaDesconocida;
   bool get articuloDesconocido => code == SalaErrorCodes.articuloDesconocido;
   bool get comandaCerrada => code == SalaErrorCodes.comandaCerrada;
+
+  /// Al marchar: el pase no tiene líneas activas y además no existe en la
+  /// configuración del host o los pases están desactivados.
+  bool get paseNoValido => code == SalaErrorCodes.paseNoValido;
+
+  /// Al marchar: el pase existe pero la comanda no tiene líneas activas de él.
+  bool get paseSinLineas => code == SalaErrorCodes.paseSinLineas;
 }
 
 /// La operación necesita sesión con el host y no la hay (ni se está

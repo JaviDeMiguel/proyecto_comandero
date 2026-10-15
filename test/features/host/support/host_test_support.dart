@@ -11,6 +11,7 @@ import 'package:proyecto_comandero/features/host/domain/host_snapshot.dart';
 import 'package:proyecto_comandero/features/sala/domain/enrutamiento_comandas.dart';
 import 'package:proyecto_comandero/features/sala/domain/linea_comanda.dart';
 import 'package:proyecto_comandero/features/sala/domain/mesa.dart';
+import 'package:proyecto_comandero/features/sala/domain/pases.dart';
 import 'package:proyecto_comandero/features/sala/protocol/sala_messages.dart';
 
 import '../fakes/fake_ports.dart';
@@ -112,7 +113,8 @@ ArticuloCatalogo articulo(
   bloqueado: bloqueado,
 );
 
-/// Línea de comanda a partir de un artículo del catálogo de prueba.
+/// Línea de comanda a partir de un artículo del catálogo de prueba
+/// ([pase] `null` = directa).
 LineaComanda linea(
   String id,
   String referencia,
@@ -121,6 +123,7 @@ LineaComanda linea(
   DestinoPreparacion destino = DestinoPreparacion.cocina,
   DateTime? creadaEn,
   CatalogSnapshot? catalogo,
+  int? pase,
 }) {
   final art = (catalogo ?? catalogoPrueba()).porReferencia(referencia)!;
   return LineaComanda(
@@ -135,14 +138,25 @@ LineaComanda linea(
     nota: nota,
     destino: destino,
     creadaEn: creadaEn ?? DateTime(2026, 10, 7, 13, 0),
+    pase: pase,
   );
 }
 
+/// Envío de líneas a una mesa; sin líneas, un envío de solo [comensales]
+/// para la comanda [comandaId] (§4.4 del diseño de impresión).
 ComandaSubmitPayload submit(
   String mesaId,
   List<LineaComanda> lineas, {
   String? camarero,
-}) => ComandaSubmitPayload(mesaId: mesaId, lineas: lineas, camarero: camarero);
+  int? comensales,
+  String? comandaId,
+}) => ComandaSubmitPayload(
+  mesaId: mesaId,
+  lineas: lineas,
+  camarero: camarero,
+  comensales: comensales,
+  comandaId: comandaId,
+);
 
 /// Sala mínima en memoria con el catálogo de prueba cargado.
 final class SalaFixture {
@@ -156,8 +170,8 @@ final class SalaFixture {
   );
 
   /// [catalogo] sustituye al catálogo de prueba (ignorado si
-  /// `conCatalogo` es falso); [enrutamiento] es el de la sala. [newId]
-  /// sustituye a los ids correlativos `id-N` (p. ej. ids únicos por
+  /// `conCatalogo` es falso); [enrutamiento] y [pases] son los de la sala.
+  /// [newId] sustituye a los ids correlativos `id-N` (p. ej. ids únicos por
   /// ejecución en los tests contra el sandbox).
   static Future<SalaFixture> create({
     InMemoryHostStateRepository? repo,
@@ -165,6 +179,7 @@ final class SalaFixture {
     bool conCatalogo = true,
     CatalogSnapshot? catalogo,
     EnrutamientoComandas enrutamiento = const EnrutamientoComandas(),
+    PasesConfig pases = const PasesConfig(),
     String Function()? newId,
   }) async {
     final repository = repo ?? InMemoryHostStateRepository();
@@ -193,6 +208,7 @@ final class SalaFixture {
       now: reloj.call,
       newId: newId ?? () => 'id-${++ids}',
       enrutamiento: enrutamiento,
+      pases: pases,
     );
     return SalaFixture._(repository, store, alerts, reloj, catalog, sala);
   }

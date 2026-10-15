@@ -367,6 +367,10 @@ final class ReciboFactura extends Equatable {
 }
 
 /// Resultado de crear (o reanudar) la factura de un ticket.
+///
+/// La factura impresa y su QR usan [fecha] y [totalFsCents], que son siempre
+/// los de FacturaScripts (o `null` si no los devolvió): nunca se sustituyen
+/// por la fecha o el total del ticket.
 final class ResultadoFactura extends Equatable {
   const ResultadoFactura({
     required this.idfactura,
@@ -379,6 +383,8 @@ final class ResultadoFactura extends Equatable {
     required this.yaExistia,
     required this.avisos,
     this.recibos = const [],
+    this.fecha,
+    this.totalFsCents,
   });
 
   final int idfactura;
@@ -389,8 +395,22 @@ final class ResultadoFactura extends Equatable {
   /// Número dentro de la serie. Llega como texto en los GET.
   final String numero;
 
-  /// Total calculado por FacturaScripts, en céntimos.
+  /// Fecha y hora de la factura en FacturaScripts (hora local). El ERP puede
+  /// cambiarlas respecto a las del ticket al rellenar un hueco de numeración,
+  /// por eso la factura impresa y su QR usan esta y no [TicketFactura.fechaHora].
+  /// Sin `hora` en el ERP, las 00:00:00. `null` si FacturaScripts no devolvió
+  /// la fecha ni al releer la factura.
+  final DateTime? fecha;
+
+  /// Total calculado por FacturaScripts, en céntimos; si el ERP no lo
+  /// devolvió, el total del ticket. Para imprimir o para el QR usa
+  /// [totalFsCents].
   final int totalCents;
+
+  /// Total de la factura en FacturaScripts, en céntimos: el importe impreso y
+  /// el del QR. `null` si el ERP no lo devolvió ni al releer la factura; a
+  /// diferencia de [totalCents], nunca se rellena con el total del ticket.
+  final int? totalFsCents;
   final bool pagada;
 
   /// Asiento de venta generado automáticamente; `null` si el ejercicio no
@@ -421,7 +441,9 @@ final class ResultadoFactura extends Equatable {
     idfactura,
     codigo,
     numero,
+    fecha,
     totalCents,
+    totalFsCents,
     pagada,
     idasiento,
     emitida,

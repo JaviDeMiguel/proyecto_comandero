@@ -353,14 +353,35 @@ class _SesionesSheet extends StatelessWidget {
   }
 }
 
-class _AlertasSheet extends StatelessWidget {
+class _AlertasSheet extends ConsumerStatefulWidget {
   const _AlertasSheet({required this.alertas});
 
   /// Del más nuevo al más antiguo.
   final List<OperationalAlert> alertas;
 
   @override
+  ConsumerState<_AlertasSheet> createState() => _AlertasSheetState();
+}
+
+class _AlertasSheetState extends ConsumerState<_AlertasSheet> {
+  /// Reintenta [trabajo] y redibuja: si ya no se puede reintentar (salió,
+  /// lo sustituyó un DUPLICADO o está en curso), su botón desaparece.
+  Future<void> _reintentar(String trabajo) async {
+    await ejecutarAccion(
+      context,
+      () => ref.read(printingServiceProvider).reintentar(trabajo),
+      exito: 'Trabajo reenviado a la impresora',
+    );
+    if (mounted) setState(() {});
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final alertas = widget.alertas;
+    // Un aviso nuevo (p. ej. el reintento volvió a fallar) puede devolver el
+    // botón a un aviso anterior del mismo trabajo.
+    ref.watch(alertasProvider);
+    final printing = ref.watch(printingServiceProvider);
     if (alertas.isEmpty) {
       return const SizedBox(
         height: 200,
@@ -385,6 +406,7 @@ class _AlertasSheet extends StatelessWidget {
             AlertaNivel.aviso => (Icons.warning_amber, scheme.tertiary),
             AlertaNivel.error => (Icons.error_outline, scheme.error),
           };
+          final trabajo = a.trabajoImpresion;
           return ListTile(
             leading: Icon(icono, color: color),
             title: Text(a.titulo),
@@ -395,6 +417,14 @@ class _AlertasSheet extends StatelessWidget {
                 if (a.detalle != null) a.detalle!,
               ].join(' · '),
             ),
+            trailing: trabajo == null || !printing.puedeReintentar(trabajo)
+                ? null
+                : TextButton.icon(
+                    key: Key('alerta-reintentar-$trabajo'),
+                    onPressed: () => _reintentar(trabajo),
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Reintentar'),
+                  ),
           );
         },
       ),

@@ -32,8 +32,13 @@ final class PaginaPruebaData {
 
 /// Genera los bytes de la página de prueba. Top-level: se ejecuta con
 /// `IsolateRunner.run`.
+///
+/// Ninguna línea fija pasa del ancho de su propio papel, y la regla numerada
+/// lo ocupa entero: si el papel del perfil no es el de la impresora, la regla
+/// se parte o no llega al borde.
 Uint8List generarPaginaPrueba(PaginaPruebaData data) {
-  final builder = EscPosBuilder(paper: data.paper)
+  final paper = data.paper;
+  final builder = EscPosBuilder(paper: paper)
     ..init()
     ..line(
       'PRUEBA DE IMPRESIÓN',
@@ -44,16 +49,18 @@ Uint8List generarPaginaPrueba(PaginaPruebaData data) {
     ..separator()
     ..line('Destino: ${data.destino}')
     ..line('Impresora: ${data.impresora}')
-    ..line(
-      'Papel: ${data.paper == PaperWidth.mm58 ? '58' : '80'} mm '
-      '(${data.paper.columns} columnas)',
-    )
+    ..line('Papel: ${paper.etiqueta}, ${paper.columns} columnas')
     ..line('Enviado por: ${data.dispositivo}')
     ..line('Fecha: ${data.fechaHora}')
     ..separator()
-    ..line('Acentos: áéíóú ÁÉÍÓÚ ñÑ üÜ ¿¡ º €')
-    ..line('1234567890' * (data.paper.columns ~/ 10))
+    ..line('Acentos: áéíóú ÁÉÍÓÚ ñÑ üÜ')
+    ..line('Signos: ¿¡ º €')
+    ..line(_regla(paper.columns))
     ..feed(3)
     ..cut();
   return builder.build();
 }
+
+/// `123456789012…` con [columnas] cifras: la regla de ancho completo.
+String _regla(int columnas) =>
+    List.generate(columnas, (i) => '${(i + 1) % 10}').join();

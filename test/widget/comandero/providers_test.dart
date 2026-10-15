@@ -7,7 +7,10 @@ import 'package:proyecto_comandero/features/comandero/data/in_memory_comandero_c
 import 'package:proyecto_comandero/features/comandero/domain/comandero_config.dart';
 import 'package:proyecto_comandero/features/comandero/domain/comandero_state.dart';
 import 'package:proyecto_comandero/features/comandero/domain/pedido_en_edicion.dart';
+import 'package:proyecto_comandero/features/comandero/domain/traspaso_comandero.dart';
 import 'package:proyecto_comandero/features/comandero/presentation/providers.dart';
+import 'package:proyecto_comandero/features/sala/domain/comanda.dart';
+import 'package:proyecto_comandero/features/sala/domain/pases.dart';
 import 'package:proyecto_comandero/features/settings/data/in_memory_settings_repository.dart';
 import 'package:proyecto_comandero/features/settings/domain/app_settings.dart';
 import 'package:proyecto_comandero/features/settings/presentation/settings_providers.dart';
@@ -242,7 +245,128 @@ void main() {
     await container.read(comanderoControllerProvider.future);
     await pumpEventQueue();
 
-    expect(avisos.single.mensaje, contains('2 anulación(es)'));
+    expect(
+      avisos.single.mensaje,
+      contains(
+        '2 petición(es) sin confirmar (anulaciones o marchas) se han '
+        'cancelado: repítelas',
+      ),
+    );
+  });
+
+  test('u2: una marcha en cola sin conexión cuenta con las anulaciones en el '
+      'aviso del traspaso', () async {
+    final avisos = <AvisoComandero>[];
+    final subAvisos = container.listen(
+      comanderoAvisosProvider,
+      (_, next) => next.whenData(avisos.add),
+    );
+    addTearDown(subAvisos.close);
+    final primero = await container.read(
+      comanderoControllerProvider.future,
+    ) as FakeComanderoGateway;
+    primero
+      ..anulacionesEnCola = 1
+      ..emitir(
+        Conectado(
+          host: kHostPrueba,
+          sala: salaPrueba(
+            comandas: [
+              Comanda(
+                id: 'c1',
+                mesaId: 'm1',
+                abiertaEn: kAhora,
+                lineas: [lineaPrueba('x1', 'PAELLA', pase: 2)],
+              ),
+            ],
+            pases: const PasesConfig(),
+          ),
+        ),
+      )
+      ..perderConexion();
+    // La marcha queda en cola y el traspaso la cancela: no se puede pasar
+    // al controlador nuevo.
+    final marcha = expectLater(
+      primero.marcharPase('m1', 2),
+      throwsA(isA<NetworkException>()),
+    );
+    expect(primero.pendientes, 1);
+
+    await container
+        .read(appSettingsProvider.notifier)
+        .actualizar((s) => s.copyWith(deviceName: 'Terraza'));
+    await pumpEventQueue();
+    await container.read(comanderoControllerProvider.future);
+    await pumpEventQueue();
+    await marcha;
+
+    expect(avisos, hasLength(1));
+    expect(
+      avisos.single.mensaje,
+      contains('2 petición(es) sin confirmar (anulaciones o marchas)'),
+    );
+    expect(avisos.single.mensaje, isNot(contains('anulación(es)')));
+  });
+
+  test('u2: el aviso pendiente de un controlador que se libera antes de '
+      'mostrarlo se descarta', () async {
+    final sub = container.listen(comanderoControllerProvider, (_, _) {});
+    addTearDown(sub.close);
+    final primero = await container.read(
+      comanderoControllerProvider.future,
+    ) as FakeComanderoGateway;
+    primero.anulacionesEnCola = 1;
+    final ajustes = container.read(appSettingsProvider.notifier);
+
+    // El segundo recibe el aviso, pero nadie lo muestra antes de recrearlo.
+    await ajustes.actualizar((s) => s.copyWith(deviceName: 'Terraza'));
+    await pumpEventQueue();
+    final segundo = await container.read(comanderoControllerProvider.future);
+    await pumpEventQueue();
+    await ajustes.actualizar((s) => s.copyWith(deviceName: 'Barra'));
+    await pumpEventQueue();
+    final tercero = await container.read(comanderoControllerProvider.future);
+    await pumpEventQueue();
+    expect(creados, [primero, segundo, tercero]);
+
+    final avisos = <AvisoComandero>[];
+    final subAvisos = container.listen(
+      comanderoAvisosProvider,
+      (_, next) => next.whenData(avisos.add),
+    );
+    addTearDown(subAvisos.close);
+    await pumpEventQueue();
+    expect(avisos, isEmpty);
+  });
+
+  test('u2: TraspasoComandero compara por valor y cuenta las líneas y las '
+      'peticiones perdidas', () {
+    final pedido = PedidoEnEdicion.vacio(
+      'm1',
+    ).conArticulo(kCatalogoPrueba.porReferencia('CANA')!, nuevoId: () => 'l1');
+    final traspaso = TraspasoComandero(
+      pedidos: [pedido],
+      lineasDevueltas: 1,
+      peticionesPerdidas: 2,
+    );
+
+    expect(
+      traspaso,
+      TraspasoComandero(
+        pedidos: [pedido],
+        lineasDevueltas: 1,
+        peticionesPerdidas: 2,
+      ),
+    );
+    expect(
+      traspaso,
+      isNot(TraspasoComandero(pedidos: [pedido], lineasDevueltas: 1)),
+    );
+    expect(traspaso.lineas, 1);
+    expect(traspaso.estaVacio, isFalse);
+    // Una marcha o una anulación perdida también hay que avisarla.
+    expect(const TraspasoComandero(peticionesPerdidas: 1).estaVacio, isFalse);
+    expect(const TraspasoComandero().estaVacio, isTrue);
   });
 
   test('u3: con un rol distinto de comandero no crea el controlador', () async {
@@ -346,5 +470,53 @@ void main() {
 
     expect(recibidos, [1, 3]);
     expect(cambios.hasListener, isFalse);
+  });
+
+  test('marchasEnCursoProvider sigue cada marcha de su mesa hasta que '
+      'termina, bien o con error', () async {
+    final bien = Completer<Comanda>();
+    final mal = Completer<Comanda>();
+    container.read(marchasEnCursoProvider('m1').notifier)
+      ..seguir(2, bien.future)
+      ..seguir(3, mal.future);
+
+    expect(container.read(marchasEnCursoProvider('m1')), {2, 3});
+    expect(container.read(marchasEnCursoProvider('m2')), isEmpty);
+
+    bien.complete(Comanda(id: 'c1', mesaId: 'm1', abiertaEn: kAhora));
+    await pumpEventQueue();
+    expect(container.read(marchasEnCursoProvider('m1')), {3});
+
+    mal.completeError(const NetworkException('Conexión cerrada'));
+    await pumpEventQueue();
+    expect(container.read(marchasEnCursoProvider('m1')), isEmpty);
+  });
+
+  test('marchasEnCursoProvider conserva las marchas sin nadie que lo '
+      'escuche', () async {
+    final marcha = Completer<Comanda>();
+    final sub = container.listen(marchasEnCursoProvider('m1'), (_, _) {});
+    container
+        .read(marchasEnCursoProvider('m1').notifier)
+        .seguir(2, marcha.future);
+    // La página de la mesa se cierra: deja de escucharlo.
+    sub.close();
+    await pumpEventQueue();
+
+    expect(container.read(marchasEnCursoProvider('m1')), {2});
+    marcha.complete(Comanda(id: 'c1', mesaId: 'm1', abiertaEn: kAhora));
+    await pumpEventQueue();
+    expect(container.read(marchasEnCursoProvider('m1')), isEmpty);
+  });
+
+  test('marchasEnCursoProvider no falla si la marcha termina con el '
+      'contenedor ya liberado', () async {
+    final otro = ProviderContainer();
+    final marcha = Completer<Comanda>();
+    otro.read(marchasEnCursoProvider('m1').notifier).seguir(1, marcha.future);
+    otro.dispose();
+
+    marcha.completeError(const NetworkException('Conexión cerrada'));
+    await pumpEventQueue();
   });
 }

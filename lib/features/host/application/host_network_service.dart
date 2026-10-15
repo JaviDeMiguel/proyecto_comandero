@@ -73,6 +73,11 @@ final class HostNetworkConfig {
 /// [SalaService] y [CatalogService]; los errores de negocio viajan como
 /// `error` no reintentable con su código y un payload mal formado como
 /// `validation`.
+///
+/// Los envíos de líneas (`comanda.submit`) y las marchas de pase
+/// (`comanda.pase.marchar`) que llegan sin camarero se firman con el nombre
+/// del dispositivo de la sesión: la línea y la marcha guardan quién las
+/// pidió aunque el comandero no lo mande.
 final class HostNetworkService {
   HostNetworkService({
     required this._sala,
@@ -253,8 +258,9 @@ final class HostNetworkService {
           }
           return catalogo.toJson();
         case SalaMessageTypes.comandaSubmit:
+          final envio = ComandaSubmitPayload.fromJson(payload);
           final result = await _sala.aceptarLineas(
-            ComandaSubmitPayload.fromJson(payload),
+            envio.copyWith(camarero: _camareroDe(envio.camarero, session)),
           );
           return result.toJson();
         case SalaMessageTypes.lineaAnular:
@@ -272,6 +278,16 @@ final class HostNetworkService {
             cuenta.solicitada,
           );
           return result.toJson();
+        case SalaMessageTypes.paseMarchar:
+          final marcha = MarcharPasePayload.fromJson(payload);
+          final result = await _sala.marcharPase(
+            marcha.mesaId,
+            marcha.pase,
+            marchaId: marcha.marchaId,
+            comandaId: marcha.comandaId,
+            camarero: _camareroDe(marcha.camarero, session),
+          );
+          return result.toJson();
         default:
           throw RemoteRequestException(
             "El host no entiende '${request.type}'",
@@ -285,6 +301,14 @@ final class HostNetworkService {
       );
     }
   }
+
+  /// Camarero de una petición de un comandero: el que manda o, si falta o
+  /// viene en blanco, el nombre del dispositivo de la sesión (la tablet
+  /// manda el suyo, `nombreTpv`, sin pasar por la red).
+  static String _camareroDe(String? camarero, ClientSessionInfo session) =>
+      camarero == null || camarero.trim().isEmpty
+      ? session.deviceName
+      : camarero;
 
   void _broadcast(String type, Map<String, Object?> payload) {
     final server = _server;

@@ -7,10 +7,13 @@ import '../../../core/money/money.dart';
 import '../../sala/domain/ticket.dart';
 import '../application/sala_service.dart';
 import 'providers.dart';
-import 'widgets/forma_cobro.dart';
 import 'widgets/host_feedback.dart';
 import 'widgets/host_formatos.dart';
 import 'widgets/teclado_importe.dart';
+
+// El resultado del cobro vive en su propio fichero (§7.6); se reexporta para
+// que quien abre el cobro no cambie sus importaciones.
+export 'resultado_cobro_dialog.dart' show ResultadoCobroDialog;
 
 /// Billetes de acceso rápido en el cobro en efectivo.
 const List<int> kBilletesRapidosCents = [500, 1000, 2000, 5000];
@@ -607,94 +610,6 @@ class _CobroDialogState extends ConsumerState<CobroDialog> {
           Text(valor, key: key, style: estilo),
         ],
       ),
-    );
-  }
-}
-
-/// Resultado del cobro: número local, total, forma de pago (con el reparto
-/// si es mixto) y cambio.
-class ResultadoCobroDialog extends ConsumerWidget {
-  const ResultadoCobroDialog({super.key, required this.ticket});
-
-  final Ticket ticket;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
-    final conEfectivo = ticket.pagos.any(
-      (pago) => pago.metodo == MetodoPago.efectivo,
-    );
-    return AlertDialog(
-      icon: Icon(Icons.check_circle, color: theme.colorScheme.primary),
-      title: Text('Ticket nº ${ticket.numeroLocal} cobrado'),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text(
-            '${ticket.nombreMesa} · ${formatHora(ticket.fechaHora)}',
-            style: theme.textTheme.bodyMedium,
-          ),
-          const SizedBox(height: 12),
-          Text(
-            'Total ${formatCents(ticket.totalCents)} · '
-            '${ticket.esMixto ? 'Mixto' : nombreMetodoPago(ticket.metodoPago)}',
-            key: const Key('resultado-total'),
-            style: theme.textTheme.titleMedium,
-          ),
-          if (ticket.esMixto)
-            for (final pago in ticket.pagos)
-              Text(
-                '${nombreMetodoPago(pago.metodo)} '
-                '${formatCents(pago.importeCents)}',
-                key: Key('resultado-${pago.metodo.name}'),
-                style: theme.textTheme.titleMedium,
-              ),
-          if (conEfectivo && ticket.entregadoCents != null) ...[
-            const SizedBox(height: 4),
-            Text(
-              'Entregado ${formatCents(ticket.entregadoCents!)}',
-              key: const Key('resultado-entregado'),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Cambio ${formatCents(ticket.cambioCents)}',
-              key: const Key('resultado-cambio'),
-              style: theme.textTheme.headlineMedium?.copyWith(
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-          ],
-          const SizedBox(height: 12),
-          Text(
-            ticket.esMixto
-                ? 'La factura simplificada se enviará a FacturaScripts desde '
-                      'la cola de sincronización, con un cobro por cada forma '
-                      'de pago.'
-                : 'La factura simplificada se enviará a FacturaScripts desde '
-                      'la cola de sincronización.',
-            style: theme.textTheme.bodySmall,
-          ),
-        ],
-      ),
-      actions: [
-        TextButton.icon(
-          onPressed: () => unawaited(
-            ejecutarAccion(
-              context,
-              () => ref.read(billingServiceProvider).reimprimir(ticket.id),
-              exito: 'Ticket enviado a la impresora',
-            ),
-          ),
-          icon: const Icon(Icons.print),
-          label: const Text('Imprimir copia'),
-        ),
-        FilledButton(
-          key: const Key('volver-salon'),
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Volver al salón'),
-        ),
-      ],
     );
   }
 }

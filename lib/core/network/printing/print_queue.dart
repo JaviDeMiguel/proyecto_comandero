@@ -53,6 +53,7 @@ final class PrintJob {
     this.attempts = 0,
     this.lastError,
     this.finishedAt,
+    this.nothingSent = true,
   });
 
   final String id;
@@ -73,6 +74,16 @@ final class PrintJob {
   /// Momento en que alcanzó un estado terminal.
   final DateTime? finishedAt;
 
+  /// `true` mientras ningún intento (tampoco los de las reimpresiones con
+  /// `retry`) haya pasado de la conexión: aún no hubo ninguno o todos
+  /// fallaron al conectar ([PrinterConnectException]), así que no salió
+  /// ningún byte. Pasa a `false` en cuanto un intento conecta (salga bien o
+  /// falle al escribir o al cerrar: pudo salir parte del documento) o falla
+  /// con un error no tipado, y ya no vuelve a `true`. Una factura fallida
+  /// con `nothingSent` puede reencolarse con sus mismos bytes sin duplicar
+  /// nada.
+  final bool nothingSent;
+
   bool get isFinished => status.isFinished;
 
   PrintJob _next({
@@ -80,6 +91,7 @@ final class PrintJob {
     required String? lastError,
     required DateTime? finishedAt,
     int? attempts,
+    bool? nothingSent,
   }) => PrintJob(
     id: id,
     endpoint: endpoint,
@@ -90,6 +102,7 @@ final class PrintJob {
     attempts: attempts ?? this.attempts,
     lastError: lastError,
     finishedAt: finishedAt,
+    nothingSent: nothingSent ?? this.nothingSent,
   );
 
   @override
@@ -104,7 +117,8 @@ final class PrintJob {
           other.attempts == attempts &&
           other.lastError == lastError &&
           other.createdAt == createdAt &&
-          other.finishedAt == finishedAt;
+          other.finishedAt == finishedAt &&
+          other.nothingSent == nothingSent;
 
   @override
   int get hashCode => Object.hash(
@@ -117,6 +131,7 @@ final class PrintJob {
     lastError,
     createdAt,
     finishedAt,
+    nothingSent,
   );
 
   @override
@@ -125,7 +140,32 @@ final class PrintJob {
       'intentos: $attempts${lastError == null ? '' : ', error: $lastError'})';
 }
 
-/// Política de reintentos y límites de memoria de [PrintQueue].
+/// Política de reintento de un trabajo: qué fallos del transporte se repiten
+/// con los mismos bytes.
+enum PrintRetryPolicy {
+  /// Cualquier fallo se reintenta (entrega «al menos una vez»). Un envío que
+  /// falla a mitad puede haber impreso parte del ticket y el reintento lo
+  /// imprime entero otra vez: para una comanda, una repetida es preferible a
+  /// una perdida.
+  always,
+
+  /// Solo se reintenta si el intento falló al conectar
+  /// ([PrinterConnectException]): no salió ningún byte, así que repetir no
+  /// duplica nada. Un fallo de escritura o de cierre termina el trabajo como
+  /// fallido en ese mismo intento. Es la política de las facturas: el
+  /// ORIGINAL no puede salir dos veces.
+  connectOnly;
+
+  /// Si un intento que falló con [error] debe repetirse bajo esta política.
+  /// Un error no tipado (de un transporte ajeno) no garantiza que no saliera
+  /// nada, así que [connectOnly] tampoco lo reintenta.
+  bool allowsRetry(Object error) => switch (this) {
+    PrintRetryPolicy.always => true,
+    PrintRetryPolicy.connectOnly => error is PrinterConnectException,
+  };
+}
+
+/// Límites de intentos, esperas y memoria de [PrintQueue].
 @immutable
 final class PrintQueueOptions {
   const PrintQueueOptions({
@@ -166,9 +206,12 @@ final class PrintQueueOptions {
 ///   trabajo espera para reintentar sigue ocupando la cabeza de su cola.
 /// * **Impresoras distintas, en paralelo.** Una impresora apagada no retrasa a
 ///   las demás.
-/// * **Entrega "al menos una vez".** Un envío que falla a mitad puede haber
-///   impreso parte del ticket, y el reintento lo imprime entero otra vez. Se
-///   prefiere una comanda repetida a una perdida.
+/// * **Entrega "al menos una vez" por defecto.** Un envío que falla a mitad
+///   puede haber impreso parte del ticket, y el reintento lo imprime entero
+///   otra vez. Se prefiere una comanda repetida a una perdida. Cada trabajo
+///   puede pedir otra política ([PrintRetryPolicy.connectOnly]): una factura
+///   solo se reintenta si no se llegó a conectar, porque su ORIGINAL no puede
+///   salir dos veces.
 ///
 /// La garantía de orden solo vale dentro de una instancia: usa una única
 /// [PrintQueue] por proceso y no envíes por el transporte al margen de ella.
@@ -233,6 +276,9 @@ final class PrintQueue {
   /// [bytes] no se copia (puede ser un logo rasterizado de cientos de KB): no
   /// lo modifiques después de encolarlo.
   ///
+  /// [retry] fija qué fallos se reintentan (por defecto, cualquiera); una
+  /// reimpresión posterior con [PrintQueue.retry] conserva esa política.
+  ///
   /// Lanza [ValidationException] si [bytes] está vacío (un trabajo "impreso"
   /// del que no sale papel engañaría al camarero) y [PrinterException] si la
   /// cola está cerrada o esa impresora ya acumula `maxPending` trabajos.
@@ -240,6 +286,7 @@ final class PrintQueue {
     PrinterEndpoint endpoint,
     Uint8List bytes, {
     required String description,
+    PrintRetryPolicy retry = PrintRetryPolicy.always,
   }) {
     _ensureOpen();
     if (bytes.isEmpty) {
@@ -257,7 +304,7 @@ final class PrintQueue {
       status: PrintJobStatus.queued,
       createdAt: _now(),
     );
-    final entry = _Entry(job, bytes);
+    final entry = _Entry(job, bytes, retry: retry);
     _entries[job.id] = entry;
     _schedule(entry);
     _emit(job);
@@ -294,7 +341,7 @@ final class PrintQueue {
 
   /// Reencola un trabajo [PrintJobStatus.failed] al final de la cola de su
   /// impresora, con un nuevo ciclo completo de intentos. Conserva el `id` (la
-  /// UI sigue la misma fila) y acumula `attempts`.
+  /// UI sigue la misma fila) y acumula `attempts` y `nothingSent`.
   ///
   /// Lanza [PrinterException] si el trabajo no existe, no está fallido, la
   /// cola está cerrada o la impresora ya acumula `maxPending` trabajos.
@@ -401,35 +448,72 @@ final class PrintQueue {
         lastError: entry.job.lastError,
       );
 
-      String? failure;
-      try {
-        await transport.send(entry.job.endpoint, bytes);
-      } on Object catch (error, stackTrace) {
-        // Cualquier error (también uno no tipado de un transporte ajeno) se
-        // registra como fallo del intento: la cola no puede morir por ello.
-        failure = error is AppException ? error.message : error.toString();
-        _log.warning(
-          "Fallo al imprimir '${entry.job.description}' en "
-          '${entry.job.endpoint} (intento $round de $maxAttempts)',
-          error,
-          error is AppException ? null : stackTrace,
+      final error = await _attempt(entry, bytes, round, maxAttempts);
+      // Solo un fallo al conectar garantiza que el intento no envió nada.
+      final nothingSent =
+          entry.job.nothingSent && error is PrinterConnectException;
+      if (error == null) {
+        _finish(
+          lane,
+          entry,
+          PrintJobStatus.done,
+          lastError: null,
+          nothingSent: false,
         );
-      }
-
-      if (failure == null) {
-        _finish(lane, entry, PrintJobStatus.done, lastError: null);
         return;
       }
-      if (round >= maxAttempts || _disposed) {
-        _finish(lane, entry, PrintJobStatus.failed, lastError: failure);
+      final failure = error is AppException ? error.message : error.toString();
+      // Sin intentos restantes, con la cola cerrándose o con un fallo que la
+      // política del trabajo no permite repetir (una factura que pudo enviar
+      // bytes), el trabajo queda fallido en este mismo intento.
+      if (round >= maxAttempts ||
+          _disposed ||
+          !entry.retry.allowsRetry(error)) {
+        _finish(
+          lane,
+          entry,
+          PrintJobStatus.failed,
+          lastError: failure,
+          nothingSent: nothingSent,
+        );
         return;
       }
 
       // Vuelve a `queued` sin soltar la cabeza de la cola: así puede
       // cancelarse durante la espera, pero el siguiente no se le adelanta.
-      _transition(entry, status: PrintJobStatus.queued, lastError: failure);
+      _transition(
+        entry,
+        status: PrintJobStatus.queued,
+        lastError: failure,
+        nothingSent: nothingSent,
+      );
       await _backoff(lane, round);
       if (entry.job.status != PrintJobStatus.queued) return;
+    }
+  }
+
+  /// Un envío de [bytes]. Devuelve `null` si se entregó, o el error del
+  /// intento: cualquiera (también uno no tipado de un transporte ajeno) se
+  /// registra como fallo del intento, porque la cola no puede morir por ello.
+  Future<Object?> _attempt(
+    _Entry entry,
+    Uint8List bytes,
+    int round,
+    int maxAttempts,
+  ) async {
+    try {
+      await transport.send(entry.job.endpoint, bytes);
+      return null;
+    } on Object catch (error, stackTrace) {
+      final retryable = entry.retry.allowsRetry(error);
+      _log.warning(
+        "Fallo al imprimir '${entry.job.description}' en "
+        '${entry.job.endpoint} (intento $round de $maxAttempts'
+        '${retryable ? '' : ', sin reintento: ${entry.retry.name}'})',
+        error,
+        error is AppException ? null : stackTrace,
+      );
+      return error;
     }
   }
 
@@ -474,6 +558,7 @@ final class PrintQueue {
     _Entry entry,
     PrintJobStatus status, {
     required String? lastError,
+    required bool nothingSent,
   }) {
     lane.pending.remove(entry);
     if (status == PrintJobStatus.failed) {
@@ -482,13 +567,14 @@ final class PrintQueue {
         'tras ${entry.job.attempts} intentos: $lastError',
       );
     }
-    _finalize(entry, status, lastError: lastError);
+    _finalize(entry, status, lastError: lastError, nothingSent: nothingSent);
   }
 
   void _finalize(
     _Entry entry,
     PrintJobStatus status, {
     required String? lastError,
+    bool? nothingSent,
   }) {
     // Solo los fallidos conservan los bytes (para `retry`): el historial no
     // debe retener megas de tickets ya impresos.
@@ -497,6 +583,7 @@ final class PrintQueue {
       status: status,
       lastError: lastError,
       finishedAt: _now(),
+      nothingSent: nothingSent,
     );
 
     _finished.add(entry);
@@ -518,12 +605,14 @@ final class PrintQueue {
     required PrintJobStatus status,
     required String? lastError,
     int? attempts,
+    bool? nothingSent,
   }) {
     entry.job = entry.job._next(
       status: status,
       attempts: attempts,
       lastError: lastError,
       finishedAt: null,
+      nothingSent: nothingSent,
     );
     _emit(entry.job);
   }
@@ -533,14 +622,18 @@ final class PrintQueue {
   }
 }
 
-/// Estado mutable interno de un trabajo: la foto pública vigente y los bytes.
+/// Estado mutable interno de un trabajo: la foto pública vigente, los bytes y
+/// la política de reintento.
 final class _Entry {
-  _Entry(this.job, this.bytes);
+  _Entry(this.job, this.bytes, {required this.retry});
 
   PrintJob job;
 
   /// `null` en cuanto dejan de hacer falta (ver `PrintQueue._finalize`).
   Uint8List? bytes;
+
+  /// Fijada al encolar; una reimpresión con `PrintQueue.retry` la conserva.
+  final PrintRetryPolicy retry;
   Completer<PrintJob>? waiter;
 }
 

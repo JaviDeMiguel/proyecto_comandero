@@ -102,6 +102,38 @@ void main() {
     return client;
   }
 
+  /// `comanda.submit` fiable desde [cliente], como lo manda el comandero.
+  Future<ComandaSubmitResult> enviar(
+    TcpComanderoClient cliente,
+    ComandaSubmitPayload payload,
+  ) async => ComandaSubmitResult.fromJson(
+    (await cliente.request(
+      SalaMessageTypes.comandaSubmit,
+      payload.toJson(),
+      reliable: true,
+    )).payload,
+  );
+
+  /// `comanda.pase.marchar` fiable desde [cliente], como lo manda el
+  /// comandero.
+  Future<ComandaResult> marchar(
+    TcpComanderoClient cliente,
+    MarcharPasePayload payload,
+  ) async => ComandaResult.fromJson(
+    (await cliente.request(
+      SalaMessageTypes.paseMarchar,
+      payload.toJson(),
+      reliable: true,
+    )).payload,
+  );
+
+  /// Error del host con [code] que el comandero no debe reintentar.
+  Matcher errorNoReintentable(String code) => throwsA(
+    isA<RemoteRequestException>()
+        .having((e) => e.code, 'code', code)
+        .having((e) => e.retryable, 'retryable', isFalse),
+  );
+
   test(
     'arranca con puertos efímeros y se anuncia por UDP en loopback',
     () async {
@@ -209,6 +241,42 @@ void main() {
       expect(libre.comanda, isNull);
     },
   );
+
+  test('comanda.submit sin camarero usa el nombre del dispositivo y con él '
+      'lo respeta', () async {
+    final a = await conectar('a');
+    final b = await conectar('b');
+
+    // Sin camarero: el nombre del dispositivo de la sesión, en la comanda y
+    // en cada línea del envío.
+    final sinCamarero = await enviar(a, submit('m1', [linea('l1', 'CANA', 1)]));
+    expect(sinCamarero.lineasNuevas, 1);
+    expect(sinCamarero.comanda.camarero, 'Móvil a');
+    expect(sinCamarero.comanda.lineaPorId('l1')!.camarero, 'Móvil a');
+
+    // Con camarero: se respeta.
+    final conCamarero = await enviar(
+      b,
+      submit('m2', [linea('l2', 'CAFE', 1)], camarero: 'Ana'),
+    );
+    expect(conCamarero.comanda.camarero, 'Ana');
+    expect(conCamarero.comanda.lineaPorId('l2')!.camarero, 'Ana');
+
+    // Otro dispositivo envía a la mesa de 'a': la línea lleva el camarero de
+    // su envío y la comanda conserva al primero.
+    final segundo = await enviar(b, submit('m1', [linea('l3', 'AGUA', 1)]));
+    expect(segundo.comanda.camarero, 'Móvil a');
+    expect(segundo.comanda.lineaPorId('l3')!.camarero, 'Móvil b');
+
+    // Un camarero en blanco cuenta como ausente.
+    final enBlanco = await enviar(
+      a,
+      submit('m2', [linea('l4', 'CANA', 1)], camarero: '  '),
+    );
+    expect(enBlanco.comanda.camarero, 'Ana');
+    expect(enBlanco.comanda.lineaPorId('l4')!.camarero, 'Móvil a');
+    expect(f.sala.comandaDeMesa('m2'), enBlanco.comanda);
+  });
 
   test('configurarEnrutamiento difunde enrutamiento.changed y el snapshot '
       'siguiente lleva las reglas nuevas', () async {
@@ -388,5 +456,174 @@ void main() {
     expect(await isPortFree(tcp), isTrue);
     await red.start();
     expect(red.isRunning, isTrue);
+  });
+
+  group('comanda.pase.marchar', () {
+    test('se enruta a la sala y responde ComandaResult; sin camarero (o en '
+        'blanco) marcha el dispositivo y con él se respeta', () async {
+      final a = await conectar('a');
+      final b = await conectar('b');
+      final eventosB = Inbox<ProtocolMessage>(b.messages);
+      addTearDown(eventosB.cancel);
+
+      final abierta = (await enviar(
+        a,
+        submit('m1', [
+          linea('l1', 'CANA', 2, pase: 1),
+          linea('l2', 'PAELLA', 1, pase: 2),
+        ]),
+      )).comanda;
+      // «Marchar al enviar» (por defecto): el 1.º sale marchado solo.
+      expect(abierta.pasesMarchados, {1});
+      await eventosB.next(what: 'sala.changed del envío');
+
+      final marchada = await marchar(
+        a,
+        MarcharPasePayload(
+          mesaId: 'm1',
+          pase: 2,
+          marchaId: 'marcha-1',
+          comandaId: abierta.id,
+        ),
+      );
+      expect(marchada.comanda.id, abierta.id);
+      expect(marchada.comanda, f.sala.comandaDeMesa('m1'));
+      final marcha = marchada.comanda.marchaPorId('marcha-1')!;
+      expect(marcha.pase, 2);
+      expect(marcha.camarero, 'Móvil a');
+      expect(marcha.automatica, isFalse);
+      expect(marcha.repetida, isFalse);
+      // El otro comandero recibe la comanda con la marcha.
+      final evento = SalaChangedEvent.fromJson(
+        (await eventosB.next(what: 'sala.changed de la marcha')).payload,
+      );
+      expect(evento.mesaId, 'm1');
+      expect(evento.comanda, marchada.comanda);
+
+      // Con camarero se respeta; el pase ya marchado sale «repetido».
+      final otra = await marchar(
+        b,
+        MarcharPasePayload(
+          mesaId: 'm1',
+          pase: 2,
+          marchaId: 'marcha-2',
+          comandaId: abierta.id,
+          camarero: 'Ana',
+        ),
+      );
+      final repetida = otra.comanda.marchaPorId('marcha-2')!;
+      expect(repetida.camarero, 'Ana');
+      expect(repetida.repetida, isTrue);
+
+      // La misma pulsación en otra petición (otro id de mensaje, mismo
+      // marchaId) no marcha otra vez.
+      final retransmitida = await marchar(
+        a,
+        MarcharPasePayload(
+          mesaId: 'm1',
+          pase: 2,
+          marchaId: 'marcha-1',
+          comandaId: abierta.id,
+        ),
+      );
+      expect(retransmitida.comanda, otra.comanda);
+      expect(f.sala.comandaDeMesa('m1')!.marchas.map((m) => m.pase), [1, 2, 2]);
+
+      // Un camarero en blanco cuenta como ausente: marcha el nombre del
+      // dispositivo que la manda.
+      final enBlanco = await marchar(
+        b,
+        MarcharPasePayload(
+          mesaId: 'm1',
+          pase: 1,
+          marchaId: 'marcha-3',
+          comandaId: abierta.id,
+          camarero: '  ',
+        ),
+      );
+      expect(enBlanco.comanda.marchaPorId('marcha-3')!.camarero, 'Móvil b');
+      expect(f.sala.comandaDeMesa('m1'), enBlanco.comanda);
+    });
+
+    test('los errores de sala viajan como error no reintentable', () async {
+      final a = await conectar('a');
+      MarcharPasePayload pulsacion(String mesaId, int pase, {String? id}) =>
+          MarcharPasePayload(
+            mesaId: mesaId,
+            pase: pase,
+            marchaId: 'm-$mesaId-$pase',
+            comandaId: id,
+          );
+
+      await expectLater(
+        marchar(a, pulsacion('zz', 1)),
+        errorNoReintentable(SalaErrorCodes.mesaDesconocida),
+      );
+      await expectLater(
+        marchar(a, pulsacion('m1', 1)),
+        errorNoReintentable(SalaErrorCodes.mesaSinComanda),
+      );
+      final abierta = (await enviar(
+        a,
+        submit('m1', [linea('l1', 'PAELLA', 1, pase: 2)]),
+      )).comanda;
+      // Postres existe en la configuración pero no tiene líneas.
+      await expectLater(
+        marchar(a, pulsacion('m1', 3, id: abierta.id)),
+        errorNoReintentable(SalaErrorCodes.paseSinLineas),
+      );
+      // El pase 7 no existe y no tiene líneas.
+      await expectLater(
+        marchar(a, pulsacion('m1', 7, id: abierta.id)),
+        errorNoReintentable(SalaErrorCodes.paseNoValido),
+      );
+      // La comanda que ve el comandero ya se cerró (se cobró y se reabrió).
+      await expectLater(
+        marchar(a, pulsacion('m1', 2, id: 'comanda-cobrada')),
+        throwsA(
+          isA<RemoteRequestException>()
+              .having((e) => e.code, 'code', SalaErrorCodes.mesaSinComanda)
+              .having((e) => e.message, 'message', contains('ya se cerró'))
+              .having((e) => e.retryable, 'retryable', isFalse),
+        ),
+      );
+      expect(
+        f.sala.comandaDeMesa('m1')!.marchas.where((m) => !m.automatica),
+        isEmpty,
+      );
+    });
+
+    test('un payload mal formado da validation y un tipo desconocido sigue '
+        'dando unknown_type', () async {
+      final a = await conectar('a');
+      await enviar(a, submit('m1', [linea('l1', 'PAELLA', 1, pase: 2)]));
+      final malos = <String, Map<String, Object?>>{
+        'sin marchaId': {'mesaId': 'm1', 'pase': 2},
+        'sin mesa': {'pase': 2, 'marchaId': 'x'},
+        'pase 0': {'mesaId': 'm1', 'pase': 0, 'marchaId': 'x'},
+        'pase de texto': {'mesaId': 'm1', 'pase': '2', 'marchaId': 'x'},
+        'marchaId vacío': {'mesaId': 'm1', 'pase': 2, 'marchaId': ''},
+        'marchaId de 65': {
+          'mesaId': 'm1',
+          'pase': 2,
+          'marchaId': 'x' * (MarcharPasePayload.maxLongitudMarchaId + 1),
+        },
+      };
+      for (final MapEntry(key: caso, value: payload) in malos.entries) {
+        await expectLater(
+          a.request(SalaMessageTypes.paseMarchar, payload, reliable: true),
+          errorNoReintentable(ErrorCodes.validation),
+          reason: caso,
+        );
+      }
+      // Solo la marcha automática del envío: ninguna petición marchó nada.
+      expect(f.sala.comandaDeMesa('m1')!.marchas.map((m) => m.automatica), [
+        true,
+      ]);
+      await expectLater(
+        a.request('comanda.pase.inventado', {}),
+        errorNoReintentable(ErrorCodes.unknownType),
+      );
+    });
   });
 }

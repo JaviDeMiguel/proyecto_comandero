@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "deviceId": "6f1c2a3b-0000-4000-8000-00000000abcd",
+  "deviceName": "Tablet caja",
+  "rol": "host",
+  "red": {
+    "tcpPort": 4040,
+    "discoveryPort": 4041,
+    "hostManual": "192.168.1.10:4040"
+  },
+  "mysql": {
+    "host": "192.168.1.10",
+    "port": 3306,
+    "user": "tpv",
+    "database": "facturascripts",
+    "secure": true,
+    "connectTimeoutMs": 5000,
+    "queryTimeoutMs": 15000
+  },
+  "fsApi": {
+    "baseUrl": "http://192.168.1.10/facturascripts",
+    "connectTimeoutMs": 5000,
+    "requestTimeoutMs": 30000
+  },
+  "fiscal": {
+    "codserie": "S",
+    "codcliente": "TPV",
+    "codalmacen": "ALG",
+    "codpagoEfectivo": "TPVEFE",
+    "codpagoTarjeta": "TPVTAR",
+    "idempresa": 1,
+    "emitirFacturas": true,
+    "modoAsientoZ": "soloDescuadre",
+    "subcuentasOverride": {
+      "caja570": "5700000001"
+    },
+    "nombreTpv": "TPV Barra"
+  },
+  "impresion": {
+    "tickets": {
+      "host": "192.168.1.40",
+      "port": 9100
+    },
+    "cocina": {
+      "host": "192.168.1.50",
+      "port": 9100
+    },
+    "barra": {
+      "host": "192.168.1.51",
+      "port": 9101
+    },
+    "paper": "mm58",
+    "abrirCajon": true,
+    "imprimirTicketAlCobrar": true,
+    "imprimirComandaCocina": true,
+    "enrutamiento": {
+      "porDefecto": "cocina",
+      "porFamilia": {
+        "BEB": "barra"
+      }
+    }
+  },
+  "reposicion": {
+    "automatica": true,
+    "enCierre": true,
+    "politica": {
+      "factorSinMaximo": 2.0,
+      "multiploPedido": 6.0,
+      "incluirSinMinimo": false
+    }
+  },
+  "caja": {
+    "fondoCajaCents": 15000
+  },
+  "mesas": [
+    {
+      "id": "barra",
+      "nombre": "Barra",
+      "zona": "Barra",
+      "orden": 0
+    },
+    {
+      "id": "mesa-1",
+      "nombre": "Mesa 1",
+      "zona": "Salón",
+      "orden": 1
+    },
+    {
+      "id": "terraza-2",
+      "nombre": "Terraza 2",
+      "zona": "Terraza",
+      "orden": 2,
+      "comensales": 4
+    }
+  ]
+}

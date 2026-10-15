@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:proyecto_comandero/core/inventory/inventory_models.dart';
 import 'package:proyecto_comandero/features/host/data/file_host_state_repository.dart';
 import 'package:proyecto_comandero/features/host/data/in_memory_host_state_repository.dart';
+import 'package:proyecto_comandero/features/host/domain/empresa_emisora.dart';
 import 'package:proyecto_comandero/features/host/domain/host_snapshot.dart';
 import 'package:proyecto_comandero/features/host/domain/sync_job.dart';
 import 'package:proyecto_comandero/features/sala/domain/comanda.dart';
@@ -57,6 +58,7 @@ HostSnapshot snapshotCompleto() => HostSnapshot(
     ),
   ],
   numeroLocalSiguiente: 8,
+  numeroEnvioSiguiente: 13,
   cierreAbierto: CierreAbierto(
     id: 'z1',
     abiertoEn: DateTime(2026, 10, 7, 9),
@@ -95,6 +97,19 @@ HostSnapshot snapshotCompleto() => HostSnapshot(
     ],
     obtenidasEn: DateTime(2026, 10, 7, 12, 30),
   ),
+  empresa: EmpresaEmisora(
+    idempresa: 1,
+    nombre: 'MANOLO GARCÍA HOSTELERÍA, S.L.',
+    nombrecorto: 'BAR MANOLO',
+    cifnif: 'B12345678',
+    direccion: 'C/ Mayor, 12, bajo',
+    codpostal: '28001',
+    ciudad: 'Madrid',
+    provincia: 'Madrid',
+    telefono: '910 000 000',
+    web: 'barmanolo.es',
+    obtenidaEn: DateTime(2026, 10, 7, 8, 0, 12),
+  ),
   cola: [
     SyncJob(
       id: 'j1',
@@ -123,6 +138,8 @@ void main() {
       expect(snapshot.mesas, isEmpty);
       expect(snapshot.cola, isEmpty);
       expect(snapshot.numeroLocalSiguiente, 3);
+      expect(snapshot.numeroEnvioSiguiente, 1);
+      expect(snapshot.empresa, isNull);
     });
 
     test('conJob y conTicket sustituyen por id', () {
@@ -183,6 +200,31 @@ void main() {
       );
       await anidado.save(snapshot);
       expect(await anidado.load(), snapshot);
+    });
+
+    test('ida y vuelta atómica con los campos nuevos (nº de envío y empresa '
+        'emisora)', () async {
+      final snapshot = snapshotCompleto();
+      await repo.save(snapshot);
+      expect(await File('${repo.file.path}.tmp').exists(), isFalse);
+      final texto = await repo.file.readAsString();
+      expect(texto, contains('"numeroEnvioSiguiente":13'));
+      expect(texto, contains('"empresa":{"idempresa":1,'));
+      final leido = (await repo.load())!;
+      expect(leido, snapshot);
+      expect(leido.numeroEnvioSiguiente, 13);
+      expect(leido.empresa, snapshot.empresa);
+
+      // Con los valores por defecto no se escriben.
+      final sinNuevos = HostSnapshot(
+        mesas: mesasPrueba,
+        numeroLocalSiguiente: 8,
+      );
+      await repo.save(sinNuevos);
+      final textoSin = await repo.file.readAsString();
+      expect(textoSin, isNot(contains('numeroEnvioSiguiente')));
+      expect(textoSin, isNot(contains('"empresa"')));
+      expect(await repo.load(), sinNuevos);
     });
 
     test('fichero corrupto: se aparta y se devuelve null', () async {

@@ -3,6 +3,7 @@ import 'package:equatable/equatable.dart';
 import '../../../core/isolates/escpos/escpos_builder.dart';
 import '../../../core/network/printing/raw_printer_transport.dart';
 import '../../../core/utils/json_map.dart';
+import '../../impresion/domain/formato_impresion.dart';
 import '../../sala/domain/enrutamiento_comandas.dart';
 import 'settings_json.dart';
 
@@ -17,11 +18,13 @@ final class PrintingSettings extends Equatable {
     this.imprimirTicketAlCobrar = true,
     this.imprimirComandaCocina = true,
     this.enrutamiento = const EnrutamientoComandas(),
+    this.formato = const FormatoImpresion(),
   });
 
   /// Lee los ajustes guardados. Campos ausentes → valor por defecto. Lanza
   /// [FormatException] si un campo es inválido o `ValidationException` si una
-  /// dirección de impresora no es utilizable.
+  /// dirección de impresora no es utilizable. `formato` es la excepción: se
+  /// lee de forma tolerante y, si no es un objeto, queda por defecto.
   factory PrintingSettings.fromJson(Map<String, Object?> json) {
     const defaults = PrintingSettings();
     return PrintingSettings(
@@ -45,6 +48,12 @@ final class PrintingSettings extends Equatable {
         final Map<String, Object?> map => EnrutamientoComandas.fromJson(map),
         null => defaults.enrutamiento,
       },
+      // No usa optionalMap: un `formato` que no fuera un mapa lanzaría y se
+      // convertiría en ConfigException al arrancar.
+      formato: switch (json['formato']) {
+        final Map<String, Object?> map => FormatoImpresion.fromJson(map),
+        _ => defaults.formato,
+      },
     );
   }
 
@@ -57,6 +66,9 @@ final class PrintingSettings extends Equatable {
   /// Impresora de comandas de barra (bebidas). `null` = usar la de cocina.
   final PrinterEndpoint? barra;
 
+  /// Papel **heredado** de los ajustes anteriores a los perfiles por
+  /// impresora: solo sirve de valor por defecto para las impresoras sin
+  /// perfil en [formato] (`resolverPerfil`).
   final PaperWidth paper;
 
   /// Abrir el cajón portamonedas al cobrar en efectivo.
@@ -69,6 +81,11 @@ final class PrintingSettings extends Equatable {
   /// guardados por versiones anteriores (sin este campo) cargan con todo a
   /// cocina, que era el comportamiento de entonces.
   final EnrutamientoComandas enrutamiento;
+
+  /// Perfiles por impresora, formato del ticket, emisión al cobrar, QR
+  /// VeriFactu y pases. Lo escribe solo la página «Tickets y comandas»; los
+  /// ajustes anteriores (sin este campo) cargan con el formato por defecto.
+  final FormatoImpresion formato;
 
   /// Serializa un [PrinterEndpoint] como `{host, port}`.
   static Map<String, Object?> endpointToJson(PrinterEndpoint endpoint) => {
@@ -93,6 +110,8 @@ final class PrintingSettings extends Equatable {
     'imprimirTicketAlCobrar': imprimirTicketAlCobrar,
     'imprimirComandaCocina': imprimirComandaCocina,
     'enrutamiento': enrutamiento.toJson(),
+    // Se omite si todo está por defecto, de modo que el JSON de hoy no cambia.
+    if (!formato.esPorDefecto) 'formato': formato.toJson(),
   };
 
   PrintingSettings copyWith({
@@ -107,6 +126,7 @@ final class PrintingSettings extends Equatable {
     bool? imprimirTicketAlCobrar,
     bool? imprimirComandaCocina,
     EnrutamientoComandas? enrutamiento,
+    FormatoImpresion? formato,
   }) => PrintingSettings(
     tickets: borrarTickets ? null : (tickets ?? this.tickets),
     cocina: borrarCocina ? null : (cocina ?? this.cocina),
@@ -117,6 +137,7 @@ final class PrintingSettings extends Equatable {
         imprimirTicketAlCobrar ?? this.imprimirTicketAlCobrar,
     imprimirComandaCocina: imprimirComandaCocina ?? this.imprimirComandaCocina,
     enrutamiento: enrutamiento ?? this.enrutamiento,
+    formato: formato ?? this.formato,
   );
 
   @override
@@ -129,5 +150,6 @@ final class PrintingSettings extends Equatable {
     imprimirTicketAlCobrar,
     imprimirComandaCocina,
     enrutamiento,
+    formato,
   ];
 }

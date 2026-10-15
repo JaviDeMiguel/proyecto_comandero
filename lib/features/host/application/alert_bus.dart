@@ -31,14 +31,27 @@ final class AlertBus {
   void aviso(String titulo, {String? detalle, String? origen}) =>
       emit(AlertaNivel.aviso, titulo, detalle: detalle, origen: origen);
 
-  void error(String titulo, {String? detalle, String? origen}) =>
-      emit(AlertaNivel.error, titulo, detalle: detalle, origen: origen);
+  /// [trabajoImpresion]: id del trabajo de impresión fallido, si lo hay
+  /// (`OperationalAlert.trabajoImpresion`).
+  void error(
+    String titulo, {
+    String? detalle,
+    String? origen,
+    String? trabajoImpresion,
+  }) => emit(
+    AlertaNivel.error,
+    titulo,
+    detalle: detalle,
+    origen: origen,
+    trabajoImpresion: trabajoImpresion,
+  );
 
   void emit(
     AlertaNivel nivel,
     String titulo, {
     String? detalle,
     String? origen,
+    String? trabajoImpresion,
   }) {
     final alert = OperationalAlert(
       nivel: nivel,
@@ -46,6 +59,7 @@ final class AlertBus {
       detalle: detalle,
       origen: origen,
       cuando: _now(),
+      trabajoImpresion: trabajoImpresion,
     );
     _log.log(switch (nivel) {
       AlertaNivel.info => Level.INFO,

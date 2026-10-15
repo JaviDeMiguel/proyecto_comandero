@@ -14,7 +14,10 @@
 /// `pagarFacturaCliente` con `codpago` que reescribe todos los recibos.
 /// Registra todas las llamadas y permite programar fallos y "pérdidas de
 /// respuesta" (el efecto se aplica pero el cliente recibe un error de red) para
-/// probar la idempotencia.
+/// probar la idempotencia. También simula el relleno de huecos de numeración
+/// (la factura se guarda con otra fecha y hora, [FakeFsApi.fechaHoraRellenoHueco])
+/// y una respuesta de `crearFacturaCliente` sin algún campo
+/// ([FakeFsApi.camposSinDevolverAlCrear]).
 library;
 
 import 'dart:convert';
@@ -284,6 +287,17 @@ final class FakeFsApi implements FsApi {
   /// Año fijo para la numeración de los documentos creados sin fecha.
   int anioPorDefecto = 2026;
 
+  /// Relleno de huecos de numeración simulado: si no es nulo,
+  /// `crearFacturaCliente` guarda la factura con esta fecha y hora en lugar
+  /// de las enviadas, como hace FacturaScripts cuando la factura nueva ocupa
+  /// un hueco de la serie y toma la fecha del documento anterior.
+  DateTime? fechaHoraRellenoHueco;
+
+  /// Campos que el `doc` de la respuesta de `crearFacturaCliente` NO incluye
+  /// (p. ej. `{'total'}` o `{'fecha', 'hora'}`). El registro guardado los
+  /// conserva: un `GET facturaclientes/{id}` posterior los devuelve.
+  Set<String> camposSinDevolverAlCrear = const {};
+
   // ---------------------------------------------------------------------------
   // Utilidades para los tests
 
@@ -547,7 +561,13 @@ final class FakeFsApi implements FsApi {
     if (codalmacen.isNotEmpty && find('almacenes', codalmacen) == null) {
       throw _endpointError(404, 'warehouse-not-found');
     }
-    final fecha = _fechaDe(fields['fecha']);
+    // Con relleno de huecos la factura se guarda con otra fecha y hora que
+    // las enviadas (y la numeración, el asiento y el recibo las siguen).
+    final relleno = fechaHoraRellenoHueco;
+    final fecha = relleno ?? _fechaDe(fields['fecha']);
+    final hora = relleno == null
+        ? _text(fields['hora'], orElse: '00:00:00')
+        : fsFormatTime(relleno);
     final lineas = _lineasDe(fields['lineas']);
 
     final codserie = _text(fields['codserie'], orElse: 'A');
@@ -633,7 +653,7 @@ final class FakeFsApi implements FsApi {
       'codejercicio': '${fecha.year}',
       'idempresa': 1,
       'fecha': fsFormatDate(fecha),
-      'hora': _text(fields['hora'], orElse: '00:00:00'),
+      'hora': hora,
       'observaciones': fields['observaciones'],
       'idestado': idestado,
       'editable': true,
@@ -683,7 +703,13 @@ final class FakeFsApi implements FsApi {
     // Como FS: los campos enviados vuelven como texto; los calculados como
     // tipos nativos.
     return {
-      'doc': _textified(doc, sent: fields.keys),
+      'doc': {
+        for (final MapEntry(:key, :value) in _textified(
+          doc,
+          sent: fields.keys,
+        ).entries)
+          if (!camposSinDevolverAlCrear.contains(key)) key: value,
+      },
       'lines': [for (final line in lines) Map.of(line)],
     };
   }

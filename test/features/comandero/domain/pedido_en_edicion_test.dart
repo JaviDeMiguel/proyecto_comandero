@@ -253,6 +253,148 @@ void main() {
     });
   });
 
+  group('PedidoEnEdicion: pases (WP-10)', () {
+    test('agrupaCon distingue el pase: solo acumula con el mismo pase', () {
+      final pedido = PedidoEnEdicion.vacio('m1')
+          .conArticulo(cana, nuevoId: () => 'l1', pase: 1)
+          .conArticulo(cana, nuevoId: () => 'l2', pase: 2)
+          .conArticulo(cana, nuevoId: () => 'l3')
+          .conArticulo(cana, nuevoId: () => 'l4', pase: 1, cantidad: 2)
+          .conArticulo(cana, nuevoId: () => 'l5');
+      expect(pedido.lineas.map((l) => l.id), ['l1', 'l2', 'l3']);
+      expect(pedido.lineaPorId('l1')!.cantidad, 3);
+      expect(pedido.lineaPorId('l1')!.pase, 1);
+      expect(pedido.lineaPorId('l2')!.pase, 2);
+      expect(pedido.lineaPorId('l3')!.pase, isNull);
+      expect(pedido.lineaPorId('l3')!.cantidad, 2);
+      expect(pedido.unidades, 6);
+
+      final linea = pedido.lineaPorId('l1')!;
+      expect(linea.agrupaCon(cana, null, 1), isTrue);
+      expect(linea.agrupaCon(cana, null, 2), isFalse);
+      expect(linea.agrupaCon(cana, null, null), isFalse);
+      expect(linea.agrupaCon(cana, 'fría', 1), isFalse);
+    });
+
+    test('conArticulo guarda el pase y rechaza uno no positivo', () {
+      final pedido = PedidoEnEdicion.vacio('m1')
+          .conArticulo(paella, nuevoId: () => 'l1', pase: 2, nota: 'mixta');
+      final linea = pedido.lineas.single;
+      expect(linea.pase, 2);
+      expect(linea.nota, 'mixta');
+      expect(
+        () => pedido.conArticulo(cana, nuevoId: () => 'x', pase: 0),
+        throwsA(isA<ValidationException>()),
+      );
+      expect(
+        () => LineaPedido(id: 'x', articulo: cana, cantidad: 1, pase: -1),
+        throwsA(isA<ValidationException>()),
+      );
+      // Las ediciones de cantidad y de nota conservan el pase.
+      expect(pedido.conCantidad('l1', 2).lineas.single.pase, 2);
+      expect(pedido.conNota('l1', 'sin marisco').lineas.single.pase, 2);
+      // copyWith: sin `pase` lo conserva; `() => null` la vuelve directa.
+      expect(linea.copyWith(cantidad: 3).pase, 2);
+      expect(linea.copyWith(pase: () => null).pase, isNull);
+      expect(linea.copyWith(pase: () => 3).pase, 3);
+    });
+
+    test('conCantidadYNota cambia también el pase en una sola edición', () {
+      final pedido = PedidoEnEdicion.vacio('m1')
+          .conArticulo(cana, nuevoId: () => 'l1', pase: 1)
+          .marcandoEnvio({'l1'}, enviando: true)
+          .devolviendoTrasFalloDeRed({'l1'});
+      var ids = 0;
+      final editado = pedido.conCantidadYNota(
+        'l1',
+        cantidad: 2,
+        nota: 'sin espuma',
+        pase: () => 3,
+        nuevoId: () => 'n${++ids}',
+      );
+      final linea = editado.lineas.single;
+      expect(ids, 1, reason: 'un único id nuevo para la línea devuelta');
+      expect(linea.id, 'n1');
+      expect(linea.reemplazaA, 'l1');
+      expect(linea.cantidad, 2);
+      expect(linea.nota, 'sin espuma');
+      expect(linea.pase, 3);
+      expect(linea.posiblementeTransmitida, isFalse);
+
+      // Sin `pase` se conserva; `() => null` la vuelve directa.
+      final normal = PedidoEnEdicion.vacio('m1')
+          .conArticulo(cana, nuevoId: () => 'a', pase: 2);
+      expect(
+        normal
+            .conCantidadYNota('a', cantidad: 3, nota: null)
+            .lineas
+            .single
+            .pase,
+        2,
+      );
+      final directa = normal.conCantidadYNota(
+        'a',
+        cantidad: 1,
+        nota: null,
+        pase: () => null,
+      );
+      expect(directa.lineas.single.pase, isNull);
+      expect(directa.lineas.single.id, 'a');
+      // Cambiar solo el pase ya es una edición; sin cambios no se toca.
+      expect(
+        normal
+            .conCantidadYNota('a', cantidad: 1, nota: null, pase: () => 1)
+            .lineas
+            .single
+            .pase,
+        1,
+      );
+      expect(
+        normal.conCantidadYNota('a', cantidad: 1, nota: null, pase: () => 2),
+        same(normal),
+      );
+      // La igualdad (props) distingue el pase.
+      expect(
+        normal.conCantidadYNota('a', cantidad: 1, nota: null, pase: () => 1),
+        isNot(normal),
+      );
+      expect(
+        LineaPedido(id: 'x', articulo: cana, cantidad: 1, pase: 1),
+        isNot(LineaPedido(id: 'x', articulo: cana, cantidad: 1, pase: 2)),
+      );
+      expect(
+        () => normal.conCantidadYNota(
+          'a',
+          cantidad: 1,
+          nota: null,
+          pase: () => 0,
+        ),
+        throwsA(isA<ValidationException>()),
+      );
+    });
+
+    test('aLineaComanda copia el pase (null = directa) y no pone envío', () {
+      final conPase =
+          LineaPedido(
+            id: 'l1',
+            articulo: paella,
+            cantidad: 1,
+            pase: 2,
+          ).aLineaComanda(
+            creadaEn: DateTime.utc(2026, 10, 7, 13),
+            destino: DestinoPreparacion.cocina,
+          );
+      expect(conPase.pase, 2);
+      expect(conPase.envio, isNull, reason: 'el nº de envío lo pone el host');
+      final directa = LineaPedido(id: 'l2', articulo: cana, cantidad: 1)
+          .aLineaComanda(
+            creadaEn: DateTime.utc(2026, 10, 7, 13),
+            destino: DestinoPreparacion.barra,
+          );
+      expect(directa.pase, isNull);
+    });
+  });
+
   group('ComanderoConfig', () {
     test('destinoDe usa la familia o el valor por defecto', () {
       const config = ComanderoConfig(

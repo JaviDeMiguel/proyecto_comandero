@@ -1,0 +1,541 @@
+{
+  "mesas": [
+    {
+      "id": "mesa-1",
+      "nombre": "Mesa 1",
+      "zona": "Salón",
+      "orden": 1
+    },
+    {
+      "id": "mesa-7",
+      "nombre": "Mesa 7",
+      "zona": "Salón",
+      "orden": 7,
+      "comensales": 4
+    },
+    {
+      "id": "terraza-2",
+      "nombre": "Terraza 2",
+      "zona": "Terraza",
+      "orden": 2
+    },
+    {
+      "id": "barra",
+      "nombre": "Barra",
+      "zona": "Barra",
+      "orden": 0
+    }
+  ],
+  "comandas": [
+    {
+      "id": "c-7f3a",
+      "mesaId": "mesa-7",
+      "abiertaEn": "2026-10-09T13:05:00.000",
+      "lineas": [
+        {
+          "id": "l-7f3a-1",
+          "referencia": "CANA",
+          "descripcion": "Caña",
+          "cantidad": 2.0,
+          "pvpUnitarioCents": 95,
+          "pvpUnitarioNeto": 0.86364,
+          "ivaBp": 1000,
+          "codimpuesto": "IVA10",
+          "nota": "sin espuma",
+          "estado": "enviada",
+          "destino": "barra",
+          "camarero": "Ana",
+          "creadaEn": "2026-10-09T13:05:10.000"
+        },
+        {
+          "id": "l-7f3a-2",
+          "referencia": "PAELLA",
+          "descripcion": "Paella",
+          "cantidad": 2.0,
+          "pvpUnitarioCents": 1200,
+          "pvpUnitarioNeto": 10.90909,
+          "ivaBp": 1000,
+          "codimpuesto": "IVA10",
+          "estado": "enviada",
+          "destino": "cocina",
+          "camarero": "Ana",
+          "creadaEn": "2026-10-09T13:06:00.000"
+        },
+        {
+          "id": "l-7f3a-3",
+          "referencia": "AGUA",
+          "descripcion": "Agua",
+          "cantidad": 1.0,
+          "pvpUnitarioCents": 100,
+          "pvpUnitarioNeto": 0.82645,
+          "ivaBp": 2100,
+          "codimpuesto": "IVA21",
+          "estado": "anulada",
+          "destino": "barra",
+          "creadaEn": "2026-10-09T13:06:30.000",
+          "anuladaEn": "2026-10-09T13:10:00.000",
+          "motivoAnulacion": "El cliente cambió de idea"
+        }
+      ],
+      "camarero": "Ana",
+      "comensales": 4,
+      "cuentaSolicitada": true,
+      "observaciones": "Alérgico a frutos secos"
+    },
+    {
+      "id": "c-1a2b",
+      "mesaId": "terraza-2",
+      "abiertaEn": "2026-10-09T13:20:00.000",
+      "lineas": [
+        {
+          "id": "l-1a2b-1",
+          "referencia": "CAFE",
+          "descripcion": "Café",
+          "cantidad": 1.0,
+          "pvpUnitarioCents": 130,
+          "pvpUnitarioNeto": 1.18182,
+          "ivaBp": 1000,
+          "codimpuesto": "IVA10",
+          "estado": "enviada",
+          "destino": "cocina",
+          "creadaEn": "2026-10-09T13:20:05.000"
+        }
+      ],
+      "cuentaSolicitada": false
+    }
+  ],
+  "ticketsTurno": [
+    {
+      "id": "t-0001",
+      "numeroLocal": 12,
+      "mesaId": "mesa-1",
+      "nombreMesa": "Mesa 1",
+      "comandaId": "c-0001",
+      "fechaHora": "2026-10-09T12:40:00.000",
+      "lineas": [
+        {
+          "id": "l-0001-1",
+          "referencia": "CANA",
+          "descripcion": "Caña",
+          "cantidad": 2.0,
+          "pvpUnitarioCents": 95,
+          "pvpUnitarioNeto": 0.86364,
+          "ivaBp": 1000,
+          "codimpuesto": "IVA10",
+          "estado": "enviada",
+          "destino": "barra",
+          "camarero": "Ana",
+          "creadaEn": "2026-10-09T12:10:00.000"
+        },
+        {
+          "id": "l-0001-2",
+          "referencia": "CAFE",
+          "descripcion": "Café",
+          "cantidad": 1.0,
+          "pvpUnitarioCents": 130,
+          "pvpUnitarioNeto": 1.18182,
+          "ivaBp": 1000,
+          "codimpuesto": "IVA10",
+          "estado": "enviada",
+          "destino": "barra",
+          "camarero": "Ana",
+          "creadaEn": "2026-10-09T12:30:00.000"
+        }
+      ],
+      "totales": {
+        "netoCents": 291,
+        "ivaCents": 29,
+        "totalCents": 320,
+        "desglose": [
+          {
+            "codimpuesto": "IVA10",
+            "ivaBp": 1000,
+            "baseCents": 291,
+            "cuotaCents": 29
+          }
+        ]
+      },
+      "metodoPago": "efectivo",
+      "entregadoCents": 500,
+      "camarero": "Ana",
+      "comensales": 2,
+      "factura": {
+        "estado": "sincronizado",
+        "idfactura": 318,
+        "codigo": "F2026S318",
+        "numero": 318,
+        "idasiento": 912,
+        "pagada": true,
+        "emitida": true,
+        "avisos": [],
+        "actualizadoEn": "2026-10-09T12:40:05.000"
+      }
+    },
+    {
+      "id": "t-0002",
+      "numeroLocal": 13,
+      "mesaId": "barra",
+      "nombreMesa": "Barra",
+      "comandaId": "c-0002",
+      "fechaHora": "2026-10-09T12:55:00.000",
+      "lineas": [
+        {
+          "id": "l-0002-1",
+          "referencia": "AGUA",
+          "descripcion": "Agua",
+          "cantidad": 1.0,
+          "pvpUnitarioCents": 100,
+          "pvpUnitarioNeto": 0.82645,
+          "ivaBp": 2100,
+          "codimpuesto": "IVA21",
+          "estado": "enviada",
+          "destino": "barra",
+          "creadaEn": "2026-10-09T12:50:00.000"
+        },
+        {
+          "id": "l-0002-2",
+          "referencia": "CAFE",
+          "descripcion": "Café",
+          "cantidad": 1.0,
+          "pvpUnitarioCents": 130,
+          "pvpUnitarioNeto": 1.18182,
+          "ivaBp": 1000,
+          "codimpuesto": "IVA10",
+          "estado": "enviada",
+          "destino": "barra",
+          "creadaEn": "2026-10-09T12:51:00.000"
+        }
+      ],
+      "totales": {
+        "netoCents": 201,
+        "ivaCents": 29,
+        "totalCents": 230,
+        "desglose": [
+          {
+            "codimpuesto": "IVA10",
+            "ivaBp": 1000,
+            "baseCents": 118,
+            "cuotaCents": 12
+          },
+          {
+            "codimpuesto": "IVA21",
+            "ivaBp": 2100,
+            "baseCents": 83,
+            "cuotaCents": 17
+          }
+        ]
+      },
+      "metodoPago": "tarjeta",
+      "pagos": [
+        {
+          "metodo": "efectivo",
+          "importeCents": 100
+        },
+        {
+          "metodo": "tarjeta",
+          "importeCents": 130
+        }
+      ],
+      "entregadoCents": 100,
+      "factura": {
+        "estado": "pendiente",
+        "pagada": false,
+        "emitida": false,
+        "avisos": []
+      }
+    }
+  ],
+  "numeroLocalSiguiente": 14,
+  "cierreAbierto": {
+    "id": "z-20261009",
+    "abiertoEn": "2026-10-09T09:00:00.000",
+    "fondoCajaCents": 10000,
+    "retiradasCents": 5000
+  },
+  "historialCierres": [
+    {
+      "id": "z-20261008",
+      "abiertoEn": "2026-10-08T09:00:00.000",
+      "cerradoEn": "2026-10-08T23:30:00.000",
+      "numTickets": 42,
+      "numAnulados": 1,
+      "ventasTotalCents": 123450,
+      "ventasEfectivoCents": 60000,
+      "ventasTarjetaCents": 63450,
+      "numTicketsMixtos": 2,
+      "fondoCajaCents": 10000,
+      "retiradasCents": 20000,
+      "efectivoEsperadoCents": 50000,
+      "efectivoContadoCents": 49950,
+      "descuadreCents": -50,
+      "documentoAsiento": "Z-20261008-z-20261008",
+      "asientoEncolado": true
+    },
+    {
+      "id": "z-20261007",
+      "abiertoEn": "2026-10-07T09:00:00.000",
+      "cerradoEn": "2026-10-07T23:00:00.000",
+      "numTickets": 35,
+      "numAnulados": 0,
+      "ventasTotalCents": 98000,
+      "ventasEfectivoCents": 48000,
+      "ventasTarjetaCents": 50000,
+      "fondoCajaCents": 10000,
+      "retiradasCents": 0,
+      "efectivoEsperadoCents": 58000,
+      "descuadreCents": 0,
+      "asientoEncolado": false
+    }
+  ],
+  "catalogo": {
+    "familias": [
+      {
+        "codfamilia": "BEB",
+        "descripcion": "Bebidas",
+        "madre": null
+      },
+      {
+        "codfamilia": "COM",
+        "descripcion": "Comidas",
+        "madre": null
+      }
+    ],
+    "impuestos": [
+      {
+        "codimpuesto": "IVA10",
+        "descripcion": "IVA 10%",
+        "ivaBp": 1000,
+        "recargoBp": 0,
+        "codsubcuentarep": "4770000010",
+        "activo": true
+      },
+      {
+        "codimpuesto": "IVA21",
+        "descripcion": "IVA 21%",
+        "ivaBp": 2100,
+        "recargoBp": 0,
+        "codsubcuentarep": "4770000021",
+        "activo": true
+      }
+    ],
+    "articulos": [
+      {
+        "referencia": "CANA",
+        "idproducto": 1,
+        "idvariante": 1,
+        "descripcion": "Caña",
+        "codfamilia": "BEB",
+        "codimpuesto": "IVA10",
+        "ivaBp": 1000,
+        "precioNeto": 0.86364,
+        "pvpCents": 95,
+        "nostock": true,
+        "ventasinstock": true,
+        "secompra": true,
+        "sevende": true,
+        "bloqueado": false,
+        "codbarras": null,
+        "coste": 0.0
+      },
+      {
+        "referencia": "CAFE",
+        "idproducto": 2,
+        "idvariante": 2,
+        "descripcion": "Café",
+        "codfamilia": "BEB",
+        "codimpuesto": "IVA10",
+        "ivaBp": 1000,
+        "precioNeto": 1.18182,
+        "pvpCents": 130,
+        "nostock": true,
+        "ventasinstock": true,
+        "secompra": true,
+        "sevende": true,
+        "bloqueado": false,
+        "codbarras": null,
+        "coste": 0.0
+      },
+      {
+        "referencia": "PAELLA",
+        "idproducto": 3,
+        "idvariante": 3,
+        "descripcion": "Paella",
+        "codfamilia": "COM",
+        "codimpuesto": "IVA10",
+        "ivaBp": 1000,
+        "precioNeto": 10.90909,
+        "pvpCents": 1200,
+        "nostock": true,
+        "ventasinstock": true,
+        "secompra": true,
+        "sevende": true,
+        "bloqueado": false,
+        "codbarras": null,
+        "coste": 0.0
+      },
+      {
+        "referencia": "AGUA",
+        "idproducto": 4,
+        "idvariante": 4,
+        "descripcion": "Agua",
+        "codfamilia": "BEB",
+        "codimpuesto": "IVA21",
+        "ivaBp": 2100,
+        "precioNeto": 0.82645,
+        "pvpCents": 100,
+        "nostock": true,
+        "ventasinstock": true,
+        "secompra": true,
+        "sevende": true,
+        "bloqueado": false,
+        "codbarras": null,
+        "coste": 0.0
+      },
+      {
+        "referencia": "VIEJO",
+        "idproducto": 5,
+        "idvariante": 5,
+        "descripcion": "Descatalogado",
+        "codfamilia": null,
+        "codimpuesto": "IVA21",
+        "ivaBp": 2100,
+        "precioNeto": 1.0,
+        "pvpCents": 121,
+        "nostock": true,
+        "ventasinstock": true,
+        "secompra": true,
+        "sevende": true,
+        "bloqueado": true,
+        "codbarras": null,
+        "coste": 0.0
+      }
+    ],
+    "avisos": [],
+    "obtenidoEn": "2026-10-09T08:30:00.000"
+  },
+  "catalogoVersion": "a1b2c3d4",
+  "recetas": {
+    "lineas": [
+      {
+        "refPlato": "PAELLA",
+        "refIngrediente": "ARROZ",
+        "cantidadNeta": 0.1,
+        "mermaPct": 5.0
+      },
+      {
+        "refPlato": "PAELLA",
+        "refIngrediente": "POLLO",
+        "cantidadNeta": 0.15,
+        "mermaPct": 0.0
+      }
+    ],
+    "obtenidasEn": "2026-10-09T08:31:00.000"
+  },
+  "cola": [
+    {
+      "id": "stock:t-0001",
+      "tipo": "descuentoStock",
+      "payload": {
+        "operacion": "t-0001",
+        "lineas": [
+          {
+            "referencia": "ARROZ",
+            "cantidad": 0.2
+          }
+        ]
+      },
+      "creadoEn": "2026-10-09T12:40:00.000",
+      "intentos": 1,
+      "estado": "hecho",
+      "terminadoEn": "2026-10-09T12:40:03.000",
+      "avisos": [
+        "Stock negativo de ARROZ"
+      ]
+    },
+    {
+      "id": "factura:t-0002",
+      "tipo": "factura",
+      "payload": {
+        "ticket": {
+          "id": "t-0002",
+          "numeroLocal": 13,
+          "mesaId": "barra",
+          "nombreMesa": "Barra",
+          "comandaId": "c-0002",
+          "fechaHora": "2026-10-09T12:55:00.000",
+          "lineas": [
+            {
+              "id": "l-0002-1",
+              "referencia": "AGUA",
+              "descripcion": "Agua",
+              "cantidad": 1.0,
+              "pvpUnitarioCents": 100,
+              "pvpUnitarioNeto": 0.82645,
+              "ivaBp": 2100,
+              "codimpuesto": "IVA21",
+              "estado": "enviada",
+              "destino": "barra",
+              "creadaEn": "2026-10-09T12:50:00.000"
+            },
+            {
+              "id": "l-0002-2",
+              "referencia": "CAFE",
+              "descripcion": "Café",
+              "cantidad": 1.0,
+              "pvpUnitarioCents": 130,
+              "pvpUnitarioNeto": 1.18182,
+              "ivaBp": 1000,
+              "codimpuesto": "IVA10",
+              "estado": "enviada",
+              "destino": "barra",
+              "creadaEn": "2026-10-09T12:51:00.000"
+            }
+          ],
+          "totales": {
+            "netoCents": 201,
+            "ivaCents": 29,
+            "totalCents": 230,
+            "desglose": [
+              {
+                "codimpuesto": "IVA10",
+                "ivaBp": 1000,
+                "baseCents": 118,
+                "cuotaCents": 12
+              },
+              {
+                "codimpuesto": "IVA21",
+                "ivaBp": 2100,
+                "baseCents": 83,
+                "cuotaCents": 17
+              }
+            ]
+          },
+          "metodoPago": "tarjeta",
+          "pagos": [
+            {
+              "metodo": "efectivo",
+              "importeCents": 100
+            },
+            {
+              "metodo": "tarjeta",
+              "importeCents": 130
+            }
+          ],
+          "entregadoCents": 100,
+          "factura": {
+            "estado": "pendiente",
+            "pagada": false,
+            "emitida": false,
+            "avisos": []
+          }
+        }
+      },
+      "creadoEn": "2026-10-09T12:55:00.000",
+      "intentos": 2,
+      "estado": "pendiente",
+      "ultimoError": "Tiempo de espera agotado",
+      "proximoIntentoEn": "2026-10-09T13:05:00.000",
+      "avisos": []
+    }
+  ]
+}

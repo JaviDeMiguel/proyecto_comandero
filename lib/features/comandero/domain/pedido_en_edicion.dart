@@ -24,11 +24,13 @@ final class LineaPedido extends Equatable {
     required this.articulo,
     required this.cantidad,
     this.nota,
+    this.pase,
     this.enviando = false,
     this.posiblementeTransmitida = false,
     this.reemplazaA,
   }) {
     validarCantidad(cantidad);
+    validarPase(pase);
   }
 
   final String id;
@@ -39,6 +41,12 @@ final class LineaPedido extends Equatable {
 
   /// Indicación para cocina ("sin cebolla").
   final String? nota;
+
+  /// Pase de la línea: `null` = directa (sale sin esperar a ninguna marcha);
+  /// `1..n` = posición, en base 1, en los nombres de `PasesConfig`. Viaja
+  /// tal cual en la [LineaComanda]: el host lo conserva con los pases activos
+  /// (aunque no esté en su configuración) y lo descarta si están desactivados.
+  final int? pase;
 
   /// Ya forma parte de un envío en curso (esperando el `ack` del host): no se
   /// puede editar ni quitar hasta que el host responda.
@@ -55,17 +63,18 @@ final class LineaPedido extends Equatable {
   /// Importe con IVA de la línea, en céntimos.
   int get importeCents => lineTotalCents(articulo.pvpCents, cantidad);
 
-  /// La misma carta (con el mismo precio, impuesto y familia) y la misma
-  /// nota: la cantidad se acumula en vez de abrir otra línea. Si el artículo
-  /// cambió de precio o de IVA en el catálogo, las unidades nuevas van en otra
-  /// línea con el precio vigente. Nunca se acumula en una línea en envío o
-  /// [posiblementeTransmitida].
-  bool agrupaCon(ArticuloCatalogo otro, String? otraNota) =>
+  /// La misma carta (con el mismo precio, impuesto y familia), la misma nota
+  /// y el mismo pase: la cantidad se acumula en vez de abrir otra línea. Si
+  /// el artículo cambió de precio o de IVA en el catálogo, las unidades
+  /// nuevas van en otra línea con el precio vigente. Nunca se acumula en una
+  /// línea en envío o [posiblementeTransmitida].
+  bool agrupaCon(ArticuloCatalogo otro, String? otraNota, int? otroPase) =>
       !enviando &&
       !posiblementeTransmitida &&
       articulo.referencia == otro.referencia &&
       mismoPrecio(articulo, otro) &&
-      (nota ?? '') == (otraNota ?? '');
+      (nota ?? '') == (otraNota ?? '') &&
+      pase == otroPase;
 
   /// `true` si [a] y [b] se venden igual: precio, impuesto, descripción y
   /// familia (que decide el destino de preparación).
@@ -77,9 +86,12 @@ final class LineaPedido extends Equatable {
       a.codfamilia == b.codfamilia &&
       a.descripcion == b.descripcion;
 
+  /// Copia con cambios. [pase] recibe un getter para poder dejarlo a `null`:
+  /// `pase: () => null` devuelve la línea a «directa».
   LineaPedido copyWith({
     double? cantidad,
     String? nota,
+    int? Function()? pase,
     bool? enviando,
     bool? posiblementeTransmitida,
   }) => LineaPedido(
@@ -87,13 +99,15 @@ final class LineaPedido extends Equatable {
     articulo: articulo,
     cantidad: cantidad ?? this.cantidad,
     nota: nota ?? this.nota,
+    pase: pase == null ? this.pase : pase(),
     enviando: enviando ?? this.enviando,
     posiblementeTransmitida:
         posiblementeTransmitida ?? this.posiblementeTransmitida,
     reemplazaA: reemplazaA,
   );
 
-  /// Construye la línea de comanda con los precios congelados del catálogo.
+  /// Construye la línea de comanda con los precios congelados del catálogo
+  /// y el [pase] del carrito.
   LineaComanda aLineaComanda({
     required DateTime creadaEn,
     required DestinoPreparacion destino,
@@ -111,6 +125,7 @@ final class LineaPedido extends Equatable {
     destino: destino,
     camarero: camarero,
     creadaEn: creadaEn,
+    pase: pase,
   );
 
   /// Lanza [ValidationException] si [cantidad] no es positiva y finita.
@@ -122,12 +137,20 @@ final class LineaPedido extends Equatable {
     }
   }
 
+  /// Lanza [ValidationException] si [pase] no es `null` ni positivo.
+  static void validarPase(int? pase) {
+    if (pase != null && pase < 1) {
+      throw ValidationException('El pase debe ser 1 o mayor (recibido $pase)');
+    }
+  }
+
   @override
   List<Object?> get props => [
     id,
     articulo,
     cantidad,
     nota,
+    pase,
     enviando,
     posiblementeTransmitida,
     reemplazaA,
@@ -178,26 +201,31 @@ final class PedidoEnEdicion extends Equatable {
     return null;
   }
 
-  /// Añade [articulo]; si ya hay una línea editable del mismo artículo con la
-  /// misma nota, acumula la cantidad en ella. [nuevoId] solo se invoca si
-  /// hace falta abrir línea nueva.
+  /// Añade [articulo] con el [pase] indicado (`null` = directo); si ya hay
+  /// una línea editable del mismo artículo con la misma nota y el mismo
+  /// pase, acumula la cantidad en ella. [nuevoId] solo se invoca si hace
+  /// falta abrir línea nueva.
   ///
-  /// Lanza [ValidationException] si el artículo no es vendible o la cantidad
-  /// no es válida.
+  /// Lanza [ValidationException] si el artículo no es vendible, la cantidad
+  /// no es válida o el pase no es positivo.
   PedidoEnEdicion conArticulo(
     ArticuloCatalogo articulo, {
     required String Function() nuevoId,
     double cantidad = 1,
     String? nota,
+    int? pase,
   }) {
     LineaPedido.validarCantidad(cantidad);
+    LineaPedido.validarPase(pase);
     if (!articulo.vendible) {
       throw ValidationException(
         "El artículo '${articulo.referencia}' no está a la venta",
       );
     }
     final notaLimpia = _limpiarNota(nota);
-    final index = lineas.indexWhere((l) => l.agrupaCon(articulo, notaLimpia));
+    final index = lineas.indexWhere(
+      (l) => l.agrupaCon(articulo, notaLimpia, pase),
+    );
     if (index >= 0) {
       final actual = lineas[index];
       return _reemplazando(
@@ -214,6 +242,7 @@ final class PedidoEnEdicion extends Equatable {
           articulo: articulo,
           cantidad: cantidad,
           nota: notaLimpia,
+          pase: pase,
         ),
       ],
     );
@@ -235,7 +264,13 @@ final class PedidoEnEdicion extends Equatable {
     final actual = lineas[index];
     return _reemplazando(
       index,
-      _editada(actual, cantidad: cantidad, nota: actual.nota, nuevoId: nuevoId),
+      _editada(
+        actual,
+        cantidad: cantidad,
+        nota: actual.nota,
+        pase: actual.pase,
+        nuevoId: nuevoId,
+      ),
     );
   }
 
@@ -254,31 +289,47 @@ final class PedidoEnEdicion extends Equatable {
         actual,
         cantidad: actual.cantidad,
         nota: _limpiarNota(nota),
+        pase: actual.pase,
         nuevoId: nuevoId,
       ),
     );
   }
 
-  /// Fija a la vez la cantidad y la nota de una línea en una sola edición.
+  /// Fija a la vez la cantidad, la nota y, si se pasa [pase], el pase de una
+  /// línea en una sola edición (`pase: () => null` la vuelve directa; sin
+  /// [pase] conserva el que tenía).
   ///
   /// Con una línea [LineaPedido.posiblementeTransmitida] se genera un único
   /// id nuevo (encadenar [conCantidad] y [conNota] cambiaría el id en la
   /// primera y la segunda ya no encontraría la línea). Lanza
-  /// [ValidationException] como [conCantidad].
+  /// [ValidationException] como [conCantidad] o si el pase no es positivo.
   PedidoEnEdicion conCantidadYNota(
     String lineaId, {
     required double cantidad,
     required String? nota,
+    int? Function()? pase,
     String Function()? nuevoId,
   }) {
     LineaPedido.validarCantidad(cantidad);
     final index = _indiceEditable(lineaId);
     final actual = lineas[index];
     final notaLimpia = _limpiarNota(nota);
-    if (actual.cantidad == cantidad && actual.nota == notaLimpia) return this;
+    final paseNuevo = pase == null ? actual.pase : pase();
+    LineaPedido.validarPase(paseNuevo);
+    if (actual.cantidad == cantidad &&
+        actual.nota == notaLimpia &&
+        actual.pase == paseNuevo) {
+      return this;
+    }
     return _reemplazando(
       index,
-      _editada(actual, cantidad: cantidad, nota: notaLimpia, nuevoId: nuevoId),
+      _editada(
+        actual,
+        cantidad: cantidad,
+        nota: notaLimpia,
+        pase: paseNuevo,
+        nuevoId: nuevoId,
+      ),
     );
   }
 
@@ -308,10 +359,14 @@ final class PedidoEnEdicion extends Equatable {
     return PedidoEnEdicion(mesaId: mesaId, lineas: [...lineas, ...nuevas]);
   }
 
+  /// Línea editada: conserva el id salvo si [actual] es
+  /// [LineaPedido.posiblementeTransmitida], en cuyo caso estrena id y
+  /// recuerda el anterior en [LineaPedido.reemplazaA].
   LineaPedido _editada(
     LineaPedido actual, {
     required double cantidad,
     required String? nota,
+    required int? pase,
     String Function()? nuevoId,
   }) {
     if (!actual.posiblementeTransmitida) {
@@ -320,6 +375,7 @@ final class PedidoEnEdicion extends Equatable {
         articulo: actual.articulo,
         cantidad: cantidad,
         nota: nota,
+        pase: pase,
         reemplazaA: actual.reemplazaA,
       );
     }
@@ -328,6 +384,7 @@ final class PedidoEnEdicion extends Equatable {
       articulo: actual.articulo,
       cantidad: cantidad,
       nota: nota,
+      pase: pase,
       reemplazaA: actual.id,
     );
   }

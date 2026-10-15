@@ -3,7 +3,9 @@ import 'package:equatable/equatable.dart';
 import '../../../core/errors/app_exception.dart';
 import '../../../core/money/money.dart';
 import '../../../core/utils/json_map.dart';
+import '../../../core/utils/json_tolerante.dart';
 import 'linea_comanda.dart';
+import 'precuenta_emitida.dart';
 
 /// Forma de cobro de un ticket. Un ticket se cobra con una forma de pago o
 /// con las dos a la vez (cobro mixto: parte en efectivo y parte con tarjeta,
@@ -146,6 +148,9 @@ enum EstadoSincronizacion {
 }
 
 /// Datos de la factura simplificada creada en FacturaScripts.
+///
+/// [fecha] y [totalFsCents] son posteriores a la primera versión del diario:
+/// se leen de forma tolerante y solo se escriben si no son nulos.
 final class FacturaSincronizada extends Equatable {
   FacturaSincronizada({
     required this.estado,
@@ -158,6 +163,8 @@ final class FacturaSincronizada extends Equatable {
     List<String> avisos = const [],
     this.error,
     this.actualizadoEn,
+    this.fecha,
+    this.totalFsCents,
   }) : avisos = List.unmodifiable(avisos);
 
   factory FacturaSincronizada.fromJson(Map<String, Object?> json) =>
@@ -178,6 +185,10 @@ final class FacturaSincronizada extends Equatable {
           final String text => DateTime.parse(text),
           null => null,
         },
+        // Un valor ausente o ilegible se lee como «FS no lo devolvió»: sin
+        // alguno de los dos, la factura no se imprime, pero el ticket vale.
+        fecha: fechaTolerante(json['fecha']),
+        totalFsCents: enteroTolerante(json['totalFsCents']),
       );
 
   final EstadoSincronizacion estado;
@@ -193,6 +204,16 @@ final class FacturaSincronizada extends Equatable {
   final String? error;
   final DateTime? actualizadoEn;
 
+  /// Fecha **y** hora de expedición en FacturaScripts (`fecha` + `hora` del
+  /// documento): la que se imprime y la del QR. `null` si FS no la devolvió
+  /// ni al releer (factura sincronizada con una versión anterior).
+  final DateTime? fecha;
+
+  /// Total de la factura **en FacturaScripts**: el importe impreso y el del
+  /// QR. `null` si FS no lo devolvió ni al releer; nunca se rellena con el
+  /// total del TPV (un total de 0 € es válido).
+  final int? totalFsCents;
+
   Map<String, Object?> toJson() => {
     'estado': estado.name,
     if (idfactura != null) 'idfactura': idfactura,
@@ -205,6 +226,8 @@ final class FacturaSincronizada extends Equatable {
     if (error != null) 'error': error,
     if (actualizadoEn != null)
       'actualizadoEn': actualizadoEn!.toIso8601String(),
+    if (fecha != null) 'fecha': fecha!.toIso8601String(),
+    if (totalFsCents != null) 'totalFsCents': totalFsCents,
   };
 
   @override
@@ -219,6 +242,174 @@ final class FacturaSincronizada extends Equatable {
     avisos,
     error,
     actualizadoEn,
+    fecha,
+    totalFsCents,
+  ];
+}
+
+/// Datos del QR tributario con los que salió el ORIGINAL de la factura. Los
+/// DUPLICADOS los reutilizan tal cual aunque después cambien los ajustes del
+/// QR o el NIF del emisor en caché: toda impresión de una factura lleva el
+/// mismo QR que su original. Guarda cadenas, no el `QrTributario` de
+/// `lib/core/fiscal`.
+final class QrImpreso extends Equatable {
+  const QrImpreso({
+    required this.url,
+    this.leyenda,
+    required this.modo,
+    required this.entorno,
+    required this.nif,
+  });
+
+  /// Lectura estricta ([FormatException]); `ImpresionTicket.fromJson` la
+  /// envuelve y deja el QR a `null` si es ilegible.
+  factory QrImpreso.fromJson(Map<String, Object?> json) => QrImpreso(
+    url: json.requireString('url'),
+    leyenda: json.optionalString('leyenda'),
+    modo: json.requireString('modo'),
+    entorno: json.requireString('entorno'),
+    nif: json.requireString('nif'),
+  );
+
+  /// URL completa codificada en el QR.
+  final String url;
+
+  /// Leyenda impresa junto al QR (`VERI*FACTU`), o `null` si no lleva
+  /// (modo NO VERI*FACTU).
+  final String? leyenda;
+
+  /// `verifactu` | `noVerifactu` (`ModoQrVerifactu.name`).
+  final String modo;
+
+  /// `produccion` | `pruebas` (`EntornoVerifactu.name`).
+  final String entorno;
+
+  /// NIF del emisor normalizado, tal como va en la URL.
+  final String nif;
+
+  /// [leyenda] solo si no es nula.
+  Map<String, Object?> toJson() => {
+    'url': url,
+    if (leyenda != null) 'leyenda': leyenda,
+    'modo': modo,
+    'entorno': entorno,
+    'nif': nif,
+  };
+
+  @override
+  List<Object?> get props => [url, leyenda, modo, entorno, nif];
+}
+
+/// Estado de impresión del ticket (art. 14 del reglamento de facturación: un
+/// solo ORIGINAL de la factura y DUPLICADOS marcados como tales).
+///
+/// Solo se escribe en el JSON del ticket cuando no está [vacia], y cada campo
+/// solo cuando no tiene su valor por defecto.
+final class ImpresionTicket extends Equatable {
+  const ImpresionTicket({
+    this.provisionalEn,
+    this.copiasProvisional = 0,
+    this.facturaOriginalEn,
+    this.qr,
+    this.duplicados = 0,
+  });
+
+  /// Lectura tolerante: un campo ausente o ilegible toma su valor por
+  /// defecto y un [qr] ilegible se lee como `null`, sin invalidar el ticket.
+  factory ImpresionTicket.fromJson(Map<String, Object?> json) =>
+      ImpresionTicket(
+        provisionalEn: fechaTolerante(json['provisionalEn']),
+        copiasProvisional:
+            enteroPositivoTolerante(json['copiasProvisional']) ?? 0,
+        facturaOriginalEn: fechaTolerante(json['facturaOriginalEn']),
+        qr: _qrTolerante(json['qr']),
+        duplicados: enteroPositivoTolerante(json['duplicados']) ?? 0,
+      );
+
+  /// Ticket sin ninguna impresión registrada.
+  static const ImpresionTicket vacia = ImpresionTicket();
+
+  /// Primera impresión del documento provisional al cobrar.
+  final DateTime? provisionalEn;
+
+  /// Reimpresiones «COPIA» del provisional.
+  final int copiasProvisional;
+
+  /// Momento en que se encoló el ORIGINAL de la factura simplificada.
+  final DateTime? facturaOriginalEn;
+
+  /// QR con el que salió el ORIGINAL; `null` si salió sin QR (modo
+  /// desactivado) o si aún no se ha impreso.
+  final QrImpreso? qr;
+
+  /// DUPLICADOS encolados.
+  final int duplicados;
+
+  /// Todos los campos tienen su valor por defecto.
+  bool get estaVacia => this == vacia;
+
+  bool get originalImpreso => facturaOriginalEn != null;
+
+  /// La primera vez fija [provisionalEn]; después cuenta una copia más.
+  ImpresionTicket conProvisional(DateTime cuando) => ImpresionTicket(
+    provisionalEn: provisionalEn ?? cuando,
+    copiasProvisional: provisionalEn == null
+        ? copiasProvisional
+        : copiasProvisional + 1,
+    facturaOriginalEn: facturaOriginalEn,
+    qr: qr,
+    duplicados: duplicados,
+  );
+
+  /// Marca el ORIGINAL y guarda el [qr] con el que sale (`null` si sale sin
+  /// QR).
+  ImpresionTicket conFacturaOriginal(DateTime cuando, {QrImpreso? qr}) =>
+      ImpresionTicket(
+        provisionalEn: provisionalEn,
+        copiasProvisional: copiasProvisional,
+        facturaOriginalEn: cuando,
+        qr: qr,
+        duplicados: duplicados,
+      );
+
+  /// Cuenta un DUPLICADO más.
+  ImpresionTicket conDuplicado() => ImpresionTicket(
+    provisionalEn: provisionalEn,
+    copiasProvisional: copiasProvisional,
+    facturaOriginalEn: facturaOriginalEn,
+    qr: qr,
+    duplicados: duplicados + 1,
+  );
+
+  /// Solo los campos que no tienen su valor por defecto.
+  Map<String, Object?> toJson() => {
+    if (provisionalEn != null)
+      'provisionalEn': provisionalEn!.toIso8601String(),
+    if (copiasProvisional != 0) 'copiasProvisional': copiasProvisional,
+    if (facturaOriginalEn != null)
+      'facturaOriginalEn': facturaOriginalEn!.toIso8601String(),
+    if (qr != null) 'qr': qr!.toJson(),
+    if (duplicados != 0) 'duplicados': duplicados,
+  };
+
+  static QrImpreso? _qrTolerante(Object? raw) {
+    if (raw is! Map<String, Object?>) return null;
+    try {
+      return QrImpreso.fromJson(raw);
+    } on FormatException {
+      return null;
+    } on TypeError {
+      return null;
+    }
+  }
+
+  @override
+  List<Object?> get props => [
+    provisionalEn,
+    copiasProvisional,
+    facturaOriginalEn,
+    qr,
+    duplicados,
   ];
 }
 
@@ -230,6 +421,9 @@ final class FacturaSincronizada extends Equatable {
 /// El cobro puede ser mixto ([pagos] con efectivo y tarjeta). El reparto se
 /// guarda en el diario del host antes de facturar porque FacturaScripts no
 /// puede reconstruirlo.
+///
+/// [precuentas] e [impresion] son posteriores a la primera versión del
+/// diario: se leen de forma tolerante y solo se escriben si no están vacías.
 final class Ticket extends Equatable {
   /// [pagos] es opcional: sin él, el ticket se cobra entero con [metodoPago]
   /// (el comportamiento de siempre). Con él, [metodoPago] debe ser la forma
@@ -250,11 +444,14 @@ final class Ticket extends Equatable {
     this.camarero,
     this.comensales,
     this.factura,
+    List<PrecuentaEmitida> precuentas = const [],
+    this.impresion = ImpresionTicket.vacia,
   }) : lineas = List.unmodifiable(lineas),
        pagos = List<PagoTicket>.unmodifiable(
          pagos ??
              [PagoTicket(metodo: metodoPago, importeCents: totales.totalCents)],
-       ) {
+       ),
+       precuentas = List.unmodifiable(precuentas) {
     _validarPagos();
   }
 
@@ -290,6 +487,16 @@ final class Ticket extends Equatable {
           final Map<String, Object?> map => FacturaSincronizada.fromJson(map),
           null => null,
         },
+        // Una precuenta ilegible se descarta y una impresión ilegible se lee
+        // vacía: nunca invalidan el ticket.
+        precuentas: listaTolerante(
+          json['precuentas'],
+          PrecuentaEmitida.fromJson,
+        ),
+        impresion: switch (json['impresion']) {
+          final Map<String, Object?> map => ImpresionTicket.fromJson(map),
+          _ => ImpresionTicket.vacia,
+        },
       );
     } on ValidationException catch (error) {
       throw FormatException('Ticket corrupto: ${error.message}');
@@ -323,6 +530,13 @@ final class Ticket extends Equatable {
   final String? camarero;
   final int? comensales;
   final FacturaSincronizada? factura;
+
+  /// Precuentas emitidas a la mesa antes de cobrar (las de la comanda): van
+  /// a las observaciones de la factura y al detalle del ticket.
+  final List<PrecuentaEmitida> precuentas;
+
+  /// Estado de impresión: provisional, ORIGINAL de la factura y duplicados.
+  final ImpresionTicket impresion;
 
   int get totalCents => totales.totalCents;
 
@@ -390,22 +604,29 @@ final class Ticket extends Equatable {
   /// nunca con forma de fecha, que FacturaScripts reescribiría).
   String get claveFactura => 'TPV-$id';
 
-  Ticket conFactura(FacturaSincronizada factura) => Ticket(
-    id: id,
-    numeroLocal: numeroLocal,
-    mesaId: mesaId,
-    nombreMesa: nombreMesa,
-    comandaId: comandaId,
-    fechaHora: fechaHora,
-    lineas: lineas,
-    totales: totales,
-    metodoPago: metodoPago,
-    pagos: pagos,
-    entregadoCents: entregadoCents,
-    camarero: camarero,
-    comensales: comensales,
-    factura: factura,
-  );
+  /// Copia con otra [factura] u otra [impresion]; conserva todo lo demás.
+  Ticket copyWith({FacturaSincronizada? factura, ImpresionTicket? impresion}) =>
+      Ticket(
+        id: id,
+        numeroLocal: numeroLocal,
+        mesaId: mesaId,
+        nombreMesa: nombreMesa,
+        comandaId: comandaId,
+        fechaHora: fechaHora,
+        lineas: lineas,
+        totales: totales,
+        metodoPago: metodoPago,
+        pagos: pagos,
+        entregadoCents: entregadoCents,
+        camarero: camarero,
+        comensales: comensales,
+        factura: factura ?? this.factura,
+        precuentas: precuentas,
+        impresion: impresion ?? this.impresion,
+      );
+
+  /// Conserva [impresion] y [precuentas].
+  Ticket conFactura(FacturaSincronizada factura) => copyWith(factura: factura);
 
   Map<String, Object?> toJson() => {
     'id': id,
@@ -423,6 +644,9 @@ final class Ticket extends Equatable {
     if (entregadoCents != null) 'entregadoCents': entregadoCents,
     if (camarero != null) 'camarero': camarero,
     if (comensales != null) 'comensales': comensales,
+    if (precuentas.isNotEmpty)
+      'precuentas': [for (final precuenta in precuentas) precuenta.toJson()],
+    if (!impresion.estaVacia) 'impresion': impresion.toJson(),
     if (factura != null) 'factura': factura!.toJson(),
   };
 
@@ -442,5 +666,7 @@ final class Ticket extends Equatable {
     camarero,
     comensales,
     factura,
+    precuentas,
+    impresion,
   ];
 }

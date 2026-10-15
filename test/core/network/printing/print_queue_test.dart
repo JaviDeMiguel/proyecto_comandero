@@ -466,6 +466,388 @@ void main() {
     });
   });
 
+  group('PrintRetryPolicy', () {
+    const connect = PrinterConnectException('sin conexión');
+    const write = PrinterException('corte a mitad de envío');
+    final foreign = Exception('transporte roto');
+
+    test('always reintenta cualquier fallo', () {
+      expect(PrintRetryPolicy.always.allowsRetry(connect), isTrue);
+      expect(PrintRetryPolicy.always.allowsRetry(write), isTrue);
+      expect(PrintRetryPolicy.always.allowsRetry(foreign), isTrue);
+    });
+
+    test('connectOnly solo reintenta los fallos de conexión', () {
+      expect(PrintRetryPolicy.connectOnly.allowsRetry(connect), isTrue);
+      expect(PrintRetryPolicy.connectOnly.allowsRetry(write), isFalse);
+      expect(PrintRetryPolicy.connectOnly.allowsRetry(foreign), isFalse);
+    });
+  });
+
+  group('PrintQueue: política de reintento por trabajo', () {
+    late FakeTransport transport;
+    late PrintQueue queue;
+    late List<PrintJob> events;
+
+    final connectFailure = PrinterConnectException(
+      'No se pudo conectar con la impresora $_kitchen',
+    );
+    const writeFailure = PrinterException(
+      'La impresora dejó de aceptar datos (12 de 64 bytes enviados)',
+    );
+    const closeFailure = PrinterException(
+      'La impresora cortó la conexión al terminar el envío',
+    );
+
+    setUp(() {
+      transport = FakeTransport();
+      queue = PrintQueue(transport: transport, options: _fastOptions);
+      events = <PrintJob>[];
+      queue.updates.listen(events.add);
+    });
+
+    tearDown(() => queue.dispose());
+
+    PrintJob enqueueInvoice([int tag = 1]) => queue.enqueue(
+      _kitchen,
+      _ticket(tag),
+      description: 'Factura F$tag',
+      retry: PrintRetryPolicy.connectOnly,
+    );
+
+    test('connectOnly: los fallos de conexión se reintentan hasta '
+        'maxAttempts', () async {
+      transport.failNext(connectFailure, times: 3);
+      final job = enqueueInvoice();
+
+      final failed = await queue.whenFinished(job.id).timeout(_timeout);
+      await pumpEventQueue();
+
+      expect(failed.status, PrintJobStatus.failed);
+      expect(failed.attempts, 3);
+      expect(failed.lastError, connectFailure.message);
+      expect(transport.attempts, hasLength(3));
+      expect(transport.sent, isEmpty);
+      expect(_statusesOf(events, job.id), [
+        PrintJobStatus.queued,
+        PrintJobStatus.printing,
+        PrintJobStatus.queued,
+        PrintJobStatus.printing,
+        PrintJobStatus.queued,
+        PrintJobStatus.printing,
+        PrintJobStatus.failed,
+      ]);
+    });
+
+    test('connectOnly: tras fallos de conexión la factura sale entera una '
+        'sola vez', () async {
+      transport.failNext(connectFailure, times: 2);
+      final job = enqueueInvoice(7);
+
+      final done = await queue.whenFinished(job.id).timeout(_timeout);
+
+      expect(done.status, PrintJobStatus.done);
+      expect(done.attempts, 3);
+      expect(done.lastError, isNull);
+      expect(transport.sent, hasLength(1));
+      expect(
+        _bytesEqual.equals(transport.sent.single.bytes, _ticket(7)),
+        isTrue,
+      );
+    });
+
+    for (final (kind, failure) in [
+      ('escritura', writeFailure),
+      ('cierre', closeFailure),
+    ]) {
+      test('connectOnly: un fallo de $kind termina el trabajo en el primer '
+          'intento, con su mensaje y sin reintento', () async {
+        transport.failNext(failure);
+        final job = enqueueInvoice();
+
+        final failed = await queue.whenFinished(job.id).timeout(_timeout);
+        await pumpEventQueue();
+
+        expect(failed.status, PrintJobStatus.failed);
+        expect(failed.attempts, 1);
+        expect(failed.lastError, failure.message);
+        expect(failed.finishedAt, isNotNull);
+        expect(transport.attempts, hasLength(1));
+        expect(transport.sent, isEmpty);
+        expect(_statusesOf(events, job.id), [
+          PrintJobStatus.queued,
+          PrintJobStatus.printing,
+          PrintJobStatus.failed,
+        ]);
+        expect(queue.retainedBytes, 64, reason: 'conserva bytes para retry');
+      });
+    }
+
+    test('connectOnly: un fallo de escritura tras uno de conexión termina en '
+        'ese segundo intento', () async {
+      transport.failNext(connectFailure);
+      transport.failNext(writeFailure);
+      final job = enqueueInvoice();
+
+      final failed = await queue.whenFinished(job.id).timeout(_timeout);
+
+      expect(failed.status, PrintJobStatus.failed);
+      expect(failed.attempts, 2);
+      expect(failed.lastError, writeFailure.message);
+      expect(transport.attempts, hasLength(2));
+    });
+
+    test(
+      'connectOnly: un error ajeno al transporte tampoco se reintenta',
+      () async {
+        transport.failNext(Exception('transporte roto'));
+        final job = enqueueInvoice();
+
+        final failed = await queue.whenFinished(job.id).timeout(_timeout);
+
+        expect(failed.status, PrintJobStatus.failed);
+        expect(failed.attempts, 1);
+        expect(failed.lastError, contains('transporte roto'));
+        expect(transport.attempts, hasLength(1));
+      },
+    );
+
+    test('connectOnly: el trabajo fallido no bloquea a los siguientes de su '
+        'impresora', () async {
+      transport.failNext(writeFailure);
+      final invoice = enqueueInvoice(1);
+      final next = queue.enqueue(_kitchen, _ticket(2), description: 'Comanda');
+
+      final failed = await queue.whenFinished(invoice.id).timeout(_timeout);
+      final done = await queue.whenFinished(next.id).timeout(_timeout);
+
+      expect(failed.status, PrintJobStatus.failed);
+      expect(done.status, PrintJobStatus.done);
+      expect(transport.attempts, hasLength(2));
+      expect(transport.sent.single.bytes[0], 2);
+      expect(queue.pendingFor(_kitchen), 0);
+    });
+
+    test('retry conserva la política connectOnly del trabajo', () async {
+      transport.failNext(writeFailure);
+      final job = enqueueInvoice(5);
+      final failed = await queue.whenFinished(job.id).timeout(_timeout);
+      expect(failed.status, PrintJobStatus.failed);
+
+      // Otro fallo de escritura: tampoco se reintenta dentro del nuevo ciclo.
+      transport.failNext(writeFailure);
+      queue.retry(job.id);
+      final again = await queue.whenFinished(job.id).timeout(_timeout);
+      expect(again.status, PrintJobStatus.failed);
+      expect(again.attempts, 2);
+      expect(transport.attempts, hasLength(2));
+
+      // Un fallo de conexión sí se reintenta y la factura sale una sola vez.
+      transport.failNext(connectFailure);
+      queue.retry(job.id);
+      final done = await queue.whenFinished(job.id).timeout(_timeout);
+      expect(done.status, PrintJobStatus.done);
+      expect(done.attempts, 4);
+      expect(transport.attempts, hasLength(4));
+      expect(transport.sent, hasLength(1));
+      expect(
+        _bytesEqual.equals(transport.sent.single.bytes, _ticket(5)),
+        isTrue,
+      );
+    });
+
+    test('always: un fallo de escritura o de cierre se reintenta con los '
+        'mismos bytes (como hoy)', () async {
+      transport.failNext(writeFailure);
+      transport.failNext(closeFailure);
+      final job = queue.enqueue(
+        _kitchen,
+        _ticket(3),
+        description: 'Comanda',
+        retry: PrintRetryPolicy.always,
+      );
+
+      final done = await queue.whenFinished(job.id).timeout(_timeout);
+      await pumpEventQueue();
+
+      expect(done.status, PrintJobStatus.done);
+      expect(done.attempts, 3);
+      expect(transport.attempts, hasLength(3));
+      expect(
+        _bytesEqual.equals(transport.sent.single.bytes, _ticket(3)),
+        isTrue,
+      );
+      expect(_statusesOf(events, job.id), [
+        PrintJobStatus.queued,
+        PrintJobStatus.printing,
+        PrintJobStatus.queued,
+        PrintJobStatus.printing,
+        PrintJobStatus.queued,
+        PrintJobStatus.printing,
+        PrintJobStatus.done,
+      ]);
+    });
+
+    test('la política por defecto es always', () async {
+      transport.failNext(writeFailure, times: 2);
+      final job = queue.enqueue(_kitchen, _ticket(1), description: 'Comanda');
+
+      final done = await queue.whenFinished(job.id).timeout(_timeout);
+
+      expect(done.status, PrintJobStatus.done);
+      expect(done.attempts, 3);
+      expect(transport.attempts, hasLength(3));
+    });
+  });
+
+  group('PrintJob.nothingSent', () {
+    late FakeTransport transport;
+    late PrintQueue queue;
+    late List<PrintJob> events;
+
+    final connectFailure = PrinterConnectException(
+      'No se pudo conectar con la impresora $_kitchen',
+    );
+    const writeFailure = PrinterException(
+      'La impresora dejó de aceptar datos (12 de 64 bytes enviados)',
+    );
+
+    setUp(() {
+      transport = FakeTransport();
+      queue = PrintQueue(transport: transport, options: _fastOptions);
+      events = <PrintJob>[];
+      queue.updates.listen(events.add);
+    });
+
+    tearDown(() => queue.dispose());
+
+    PrintJob enqueue({PrintRetryPolicy retry = PrintRetryPolicy.connectOnly}) =>
+        queue.enqueue(
+          _kitchen,
+          _ticket(1),
+          description: 'Factura F1',
+          retry: retry,
+        );
+
+    test('es verdadero en un trabajo recién encolado', () {
+      final job = enqueue();
+
+      expect(job.nothingSent, isTrue);
+    });
+
+    test('es verdadero si todos los intentos fallaron al conectar', () async {
+      transport.failNext(connectFailure, times: 3);
+      final job = enqueue();
+
+      final failed = await queue.whenFinished(job.id).timeout(_timeout);
+
+      expect(failed.status, PrintJobStatus.failed);
+      expect(failed.attempts, 3);
+      expect(failed.nothingSent, isTrue);
+      expect(queue.find(job.id)!.nothingSent, isTrue);
+      expect(
+        events.where((e) => e.id == job.id).every((e) => e.nothingSent),
+        isTrue,
+      );
+    });
+
+    test('es falso si un intento falló al escribir', () async {
+      transport.failNext(writeFailure);
+      final job = enqueue();
+
+      final failed = await queue.whenFinished(job.id).timeout(_timeout);
+
+      expect(failed.status, PrintJobStatus.failed);
+      expect(failed.nothingSent, isFalse);
+    });
+
+    test('es falso si alguno llegó a escribir, aunque el último fallara al '
+        'conectar', () async {
+      transport.failNext(writeFailure);
+      transport.failNext(connectFailure, times: 2);
+      final job = enqueue(retry: PrintRetryPolicy.always);
+
+      final failed = await queue.whenFinished(job.id).timeout(_timeout);
+
+      expect(failed.status, PrintJobStatus.failed);
+      expect(failed.attempts, 3);
+      expect(failed.lastError, connectFailure.message);
+      expect(failed.nothingSent, isFalse);
+    });
+
+    test('es falso con un error no tipado del transporte', () async {
+      transport.failNext(Exception('transporte roto'));
+      final job = enqueue();
+
+      final failed = await queue.whenFinished(job.id).timeout(_timeout);
+
+      expect(failed.nothingSent, isFalse);
+    });
+
+    test('es falso en un trabajo impreso', () async {
+      transport.failNext(connectFailure);
+      final job = enqueue();
+
+      final done = await queue.whenFinished(job.id).timeout(_timeout);
+
+      expect(done.status, PrintJobStatus.done);
+      expect(done.nothingSent, isFalse);
+    });
+
+    test('retry lo conserva y no vuelve a verdadero', () async {
+      transport.failNext(connectFailure, times: 3);
+      final job = enqueue();
+      await queue.whenFinished(job.id).timeout(_timeout);
+
+      // Reimpresión que falla al escribir: ya pudo salir algo.
+      transport.failNext(writeFailure);
+      expect(queue.retry(job.id).nothingSent, isTrue);
+      final again = await queue.whenFinished(job.id).timeout(_timeout);
+      expect(again.nothingSent, isFalse);
+
+      // Otra que solo falla al conectar: sigue en falso.
+      transport.failNext(connectFailure, times: 3);
+      queue.retry(job.id);
+      final third = await queue.whenFinished(job.id).timeout(_timeout);
+      expect(third.status, PrintJobStatus.failed);
+      expect(third.nothingSent, isFalse);
+    });
+
+    test('forma parte de la igualdad de las fotos', () {
+      final base = PrintJob(
+        id: 'a',
+        endpoint: _kitchen,
+        description: 'd',
+        byteCount: 1,
+        status: PrintJobStatus.failed,
+        createdAt: DateTime(2026),
+      );
+      final enviado = PrintJob(
+        id: 'a',
+        endpoint: _kitchen,
+        description: 'd',
+        byteCount: 1,
+        status: PrintJobStatus.failed,
+        createdAt: DateTime(2026),
+        nothingSent: false,
+      );
+
+      expect(base.nothingSent, isTrue);
+      final otra = PrintJob(
+        id: 'a',
+        endpoint: _kitchen,
+        description: 'd',
+        byteCount: 1,
+        status: PrintJobStatus.failed,
+        createdAt: DateTime(2026),
+        nothingSent: false,
+      );
+      expect(base == enviado, isFalse);
+      expect(otra, enviado);
+      expect(otra.hashCode, enviado.hashCode);
+    });
+  });
+
   group('PrintQueue: espera creciente entre reintentos (fake_async)', () {
     test('duplica retryDelay en cada reintento hasta maxRetryDelay', () {
       fakeAsync((async) {
@@ -623,6 +1005,10 @@ void main() {
       final probe = await FakePrinter.start();
       final offline = probe.endpoint;
       await probe.close();
+      // Otro puerto cerrado para una factura: carril propio, en paralelo.
+      final probeInvoice = await FakePrinter.start();
+      final offlineInvoice = probeInvoice.endpoint;
+      await probeInvoice.close();
       final online = await FakePrinter.start();
       addTearDown(online.close);
       final queue = PrintQueue(
@@ -641,6 +1027,14 @@ void main() {
       addTearDown(queue.dispose);
 
       final broken = queue.enqueue(offline, _ticket(1), description: 'x');
+      // Fallo de conexión real (PrinterConnectException del transporte):
+      // también con connectOnly se reintenta, porque no salió ningún byte.
+      final invoice = queue.enqueue(
+        offlineInvoice,
+        _ticket(3),
+        description: 'Factura',
+        retry: PrintRetryPolicy.connectOnly,
+      );
       final ok = queue.enqueue(online.endpoint, _ticket(2), description: 'y');
 
       final done = await queue.whenFinished(ok.id).timeout(_timeout);
@@ -651,6 +1045,47 @@ void main() {
       expect(failed.status, PrintJobStatus.failed);
       expect(failed.attempts, 2);
       expect(failed.lastError, contains('$offline'));
+      final failedInvoice = await queue
+          .whenFinished(invoice.id)
+          .timeout(const Duration(seconds: 30));
+      expect(failedInvoice.status, PrintJobStatus.failed);
+      expect(failedInvoice.attempts, 2);
+      expect(failedInvoice.lastError, contains('$offlineInvoice'));
+    });
+
+    test('connectOnly: una impresora que corta a mitad de trabajo no se '
+        'reintenta', () async {
+      // Con un trabajo mucho mayor que los búferes TCP de loopback el cliente
+      // aún está escribiendo cuando llega el RST: es un fallo de escritura,
+      // no de conexión, y una factura no debe repetirse.
+      final printer = await FakePrinter.start(cutAfterBytes: 1);
+      addTearDown(printer.close);
+      final queue = PrintQueue(
+        transport: EscPosSocketPrinter(
+          options: const PrinterTransportOptions(
+            connectTimeout: Duration(seconds: 2),
+            writeTimeout: Duration(seconds: 2),
+            closeTimeout: Duration(seconds: 1),
+          ),
+        ),
+        options: const PrintQueueOptions(retryDelay: Duration(milliseconds: 5)),
+      );
+      addTearDown(queue.dispose);
+
+      final job = queue.enqueue(
+        printer.endpoint,
+        _ticket(1, length: 8 << 20),
+        description: 'Factura',
+        retry: PrintRetryPolicy.connectOnly,
+      );
+
+      final failed = await queue
+          .whenFinished(job.id)
+          .timeout(const Duration(seconds: 20));
+      expect(failed.status, PrintJobStatus.failed);
+      expect(failed.attempts, 1);
+      expect(failed.lastError, contains('${printer.endpoint}'));
+      expect(printer.connectionsAccepted, 1);
     });
   });
 }

@@ -1,6 +1,7 @@
 import 'package:proyecto_comandero/core/errors/app_exception.dart';
 import 'package:proyecto_comandero/core/facturascripts/documents/fs_invoice_service.dart';
 import 'package:proyecto_comandero/core/facturascripts/documents/invoice_models.dart';
+import 'package:proyecto_comandero/core/facturascripts/fs_api.dart';
 import 'package:test/test.dart';
 
 import '../fake_fs_api.dart';
@@ -14,6 +15,7 @@ TicketFactura ticket({
   int totalEsperadoCents = 665,
   List<LineaFactura>? lineas,
   String? observaciones = 'Mesa 12 · Ana',
+  List<PagoFactura> pagos = const [],
 }) => TicketFactura(
   claveIdempotente: clave,
   codcliente: 'TPVVARIOS',
@@ -35,9 +37,15 @@ TicketFactura ticket({
       ],
   totalEsperadoCents: totalEsperadoCents,
   modoPago: modoPago,
+  pagos: pagos,
   emitir: emitir,
   idEstadoEmitida: idEstadoEmitida,
 );
+
+/// Fecha y hora con las que el doble guarda la factura al simular el relleno
+/// de un hueco de numeración (distintas de las del ticket, 06-10-2026
+/// 21:15:03).
+final DateTime fechaHuecoFs = DateTime(2026, 10, 5, 23, 59, 58);
 
 void main() {
   late FakeFsApi api;
@@ -399,6 +407,197 @@ void main() {
     });
   });
 
+  group('fecha y total de FS', () {
+    test('salen del doc de crearFacturaCliente, sin releer', () async {
+      final result = await service.crearOReanudar(ticket());
+
+      expect(result.fecha, DateTime(2026, 10, 6, 21, 15, 3));
+      expect(result.totalFsCents, 665);
+      expect(result.totalCents, 665);
+      expect(api.callsTo('facturaclientes', method: 'GET'), isEmpty);
+    });
+
+    test('al reanudar una factura existente salen del listado', () async {
+      api.fechaHoraRellenoHueco = fechaHuecoFs;
+      final first = await service.crearOReanudar(ticket());
+      api.calls.clear();
+
+      final second = await service.crearOReanudar(ticket());
+
+      expect(second.yaExistia, isTrue);
+      expect(second.fecha, fechaHuecoFs);
+      expect(second.fecha, first.fecha);
+      expect(second.totalFsCents, 665);
+      expect(api.calls.map((c) => c.method), ['LIST']);
+    });
+
+    test('sin hora se toma 00:00:00', () async {
+      api.seed('facturaclientes', {
+        'numero2': 'TPV-T1-0001',
+        'codigo': 'F2026S1',
+        'numero': '1',
+        'fecha': '06-10-2026',
+        'total': 6.65,
+        'pagada': true,
+        'idasiento': 7,
+      });
+
+      final result = await service.crearOReanudar(ticket());
+
+      expect(result.yaExistia, isTrue);
+      expect(result.fecha, DateTime(2026, 10, 6));
+      expect(result.totalFsCents, 665);
+      expect(result.avisos, isEmpty);
+    });
+
+    test('sin total en la respuesta: relee GET facturaclientes/{id}', () async {
+      api.camposSinDevolverAlCrear = const {'total'};
+
+      final result = await service.crearOReanudar(ticket());
+
+      expect(result.totalFsCents, 665);
+      expect(result.totalCents, 665);
+      expect(result.fecha, DateTime(2026, 10, 6, 21, 15, 3));
+      expect(result.avisos, isEmpty);
+      expect(api.calls.map((c) => '${c.method} ${c.resource}'), [
+        'LIST facturaclientes',
+        'CALL crearFacturaCliente',
+        'GET facturaclientes',
+      ]);
+      expect(api.calls.last.id, 1);
+    });
+
+    test('sin fecha en la respuesta: una sola relectura', () async {
+      api.camposSinDevolverAlCrear = const {'fecha', 'hora'};
+
+      final result = await service.crearOReanudar(ticket());
+
+      expect(result.fecha, DateTime(2026, 10, 6, 21, 15, 3));
+      expect(result.totalFsCents, 665);
+      expect(result.avisos, isEmpty);
+      expect(api.callsTo('facturaclientes', method: 'GET'), hasLength(1));
+    });
+
+    test(
+      'si tampoco el GET trae el total: null, nunca el del ticket',
+      () async {
+        final sinTotal = _SinCampos(api, const {'total'});
+
+        final result = await FsInvoiceService(sinTotal)
+            .crearOReanudar(ticket(totalEsperadoCents: 700));
+
+        expect(result.totalFsCents, isNull);
+        expect(result.totalCents, 700, reason: 'totalCents: el del ticket');
+        expect(result.fecha, DateTime(2026, 10, 6, 21, 15, 3));
+        expect(result.avisos, [
+          'FacturaScripts no devolvió el total de la factura',
+        ]);
+        expect(api.callsTo('facturaclientes', method: 'GET'), hasLength(1));
+        expect(api.callsTo('crearFacturaCliente'), hasLength(1));
+      },
+    );
+
+    test(
+      'si tampoco el GET trae la fecha: null, nunca la del ticket',
+      () async {
+        final sinFecha = _SinCampos(api, const {'fecha'});
+
+        final result = await FsInvoiceService(sinFecha)
+            .crearOReanudar(ticket());
+
+        expect(result.fecha, isNull);
+        expect(result.totalFsCents, 665);
+        expect(result.avisos, [
+          'FacturaScripts no devolvió la fecha de la factura',
+        ]);
+        expect(api.callsTo('facturaclientes', method: 'GET'), hasLength(1));
+      },
+    );
+
+    test('relleno de huecos: la fecha es la de FS, no la del ticket', () async {
+      api.fechaHoraRellenoHueco = fechaHuecoFs;
+
+      final result = await service.crearOReanudar(ticket());
+
+      final enviados = api.callsTo('crearFacturaCliente').single.fields;
+      expect(enviados['fecha'], '06-10-2026');
+      expect(enviados['hora'], '21:15:03');
+      expect(result.fecha, fechaHuecoFs);
+      expect(result.totalFsCents, 665);
+      expect(result.avisos, isEmpty);
+      expect(api.callsTo('facturaclientes', method: 'GET'), isEmpty);
+    });
+
+    test(
+      'relleno de huecos con pagarTrasCrear: se conserva la de FS',
+      () async {
+        api.fechaHoraRellenoHueco = fechaHuecoFs;
+
+        final result = await service.crearOReanudar(
+          ticket(codpago: 'TPVTAR', modoPago: ModoPago.pagarTrasCrear),
+        );
+
+        expect(result.pagada, isTrue);
+        expect(result.fecha, fechaHuecoFs);
+        expect(result.totalFsCents, 665);
+      },
+    );
+
+    test('cobro mixto: conserva la fecha y el total de FS', () async {
+      api.fechaHoraRellenoHueco = fechaHuecoFs;
+
+      final result = await service.crearOReanudar(
+        ticket(
+          codpago: 'TPVTAR',
+          modoPago: ModoPago.pagarTrasCrear,
+          pagos: [
+            PagoFactura(codpago: 'TPVEFE', importeCents: 365, efectivo: true),
+            PagoFactura(codpago: 'TPVTAR', importeCents: 300),
+          ],
+        ),
+      );
+
+      expect(result.cobroMixto, isTrue);
+      expect(result.pagada, isTrue);
+      expect(result.fecha, fechaHuecoFs);
+      expect(result.totalFsCents, 665);
+      expect(result.totalCents, 665);
+      expect(result.avisos, isEmpty);
+    });
+
+    test('ResultadoFactura: opcionales (nulos) y parte de la igualdad', () {
+      const sinFs = ResultadoFactura(
+        idfactura: 1,
+        codigo: 'F2026S1',
+        numero: '1',
+        totalCents: 665,
+        pagada: true,
+        idasiento: 1,
+        emitida: false,
+        yaExistia: false,
+        avisos: [],
+      );
+      final conFs = ResultadoFactura(
+        idfactura: 1,
+        codigo: 'F2026S1',
+        numero: '1',
+        fecha: DateTime(2026, 10, 6, 21, 15, 3),
+        totalCents: 665,
+        totalFsCents: 665,
+        pagada: true,
+        idasiento: 1,
+        emitida: false,
+        yaExistia: false,
+        avisos: const [],
+      );
+
+      expect(sinFs.fecha, isNull);
+      expect(sinFs.totalFsCents, isNull);
+      expect(conFs, isNot(equals(sinFs)));
+      expect(conFs.props, containsAll([conFs.fecha, conFs.totalFsCents]));
+    });
+  });
+
   group('doble: totales classic', () {
     test('tres líneas con dos tipos de IVA (ejemplo 2 del informe)', () async {
       final result = await service.crearOReanudar(
@@ -433,6 +632,36 @@ void main() {
       expect(doc['totaliva'], 3.66);
     });
   });
+}
+
+/// Quita [campos] de la factura tanto en el `doc` de `crearFacturaCliente`
+/// como en los GET: FacturaScripts no los devuelve ni al releer.
+final class _SinCampos extends FakeFsApiDelegate {
+  _SinCampos(super.inner, this.campos);
+
+  final Set<String> campos;
+
+  @override
+  Future<FsRecord?> get(String resource, Object id) async {
+    final record = await inner.get(resource, id);
+    return record == null ? null : _filtrar(record);
+  }
+
+  @override
+  Future<FsRecord> call(
+    String endpoint, {
+    List<Object> path = const [],
+    Map<String, Object?> fields = const {},
+  }) async {
+    final response = await inner.call(endpoint, path: path, fields: fields);
+    final doc = response['doc'];
+    return doc is FsRecord ? {...response, 'doc': _filtrar(doc)} : response;
+  }
+
+  FsRecord _filtrar(FsRecord record) => {
+    for (final MapEntry(:key, :value) in record.entries)
+      if (!campos.contains(key)) key: value,
+  };
 }
 
 /// Devuelve una respuesta de `crearFacturaCliente` sin `doc`.

@@ -30,13 +30,49 @@ void main() {
       expect(PaperWidth.mm58.dots, 384);
       expect(PaperWidth.mm80.columns, 48);
       expect(PaperWidth.mm80.dots, 576);
+      expect(PaperWidth.mm80Dpi180.columns, 42);
+      expect(PaperWidth.mm80Dpi180.dots, 512);
+    });
+
+    test('resolución, etiqueta y puntos por milímetro', () {
+      expect(PaperWidth.mm58.dpi, 203);
+      expect(PaperWidth.mm80.dpi, 203);
+      expect(PaperWidth.mm80Dpi180.dpi, 180);
+      expect(PaperWidth.mm58.etiqueta, '58 mm');
+      expect(PaperWidth.mm80.etiqueta, '80 mm');
+      expect(PaperWidth.mm80Dpi180.etiqueta, '80 mm (180 ppp)');
+      expect(PaperWidth.mm80.puntosPorMm, closeTo(7.99, 0.005));
+      expect(PaperWidth.mm80Dpi180.puntosPorMm, closeTo(7.09, 0.005));
+      expect(PaperWidth.values.map((p) => p.name), [
+        'mm58',
+        'mm80',
+        'mm80Dpi180',
+      ]);
+    });
+
+    test('a 180 ppp el doble ancho dispone de 21 columnas', () {
+      final b = EscPosBuilder(paper: PaperWidth.mm80Dpi180);
+      expect(b.columnsFor(), 42);
+      expect(b.columnsFor(doubleWidth: true), 21);
+      expect(
+        decodeEscPos((b..separator()).build()).lines.single.text.runes.length,
+        42,
+      );
     });
   });
 
   group('EscPosBuilder secuencias exactas', () {
-    test('init = ESC @ + ESC t 19 (CP858)', () {
+    test('init = ESC @ + ESC t 19 (CP858) + ESC R 0 (EE. UU.)', () {
       final bytes = (EscPosBuilder(paper: PaperWidth.mm80)..init()).build();
-      expect(bytes, [esc, 0x40, esc, 0x74, 19]);
+      expect(bytes, [esc, 0x40, esc, 0x74, 19, esc, 0x52, 0]);
+      final decoded = decodeEscPos(bytes);
+      expect(decoded.commands.map((c) => c.name), [
+        'init',
+        'codepage',
+        'charset',
+      ]);
+      expect(decoded.commands[1].args, [19]);
+      expect(decoded.commands[2].args, [0]);
     });
 
     test('build() sin llamadas devuelve vacío y es una copia', () {
@@ -367,6 +403,11 @@ void main() {
   });
 
   group('layout de columnas', () {
+    // El bucle cubre los tres papeles: 32, 48 y 42 columnas.
+    test('hay tres anchuras de papel', () {
+      expect(PaperWidth.values.map((p) => p.columns), [32, 48, 42]);
+    });
+
     for (final paper in PaperWidth.values) {
       test(
         'row rellena exactamente ${paper.columns} columnas (${paper.name})',
@@ -582,6 +623,332 @@ void main() {
         const Column('a', width: 3, align: EscPosAlign.left),
       );
       expect(const Column('a', width: 3), isNot(const Column('a', width: 4)));
+    });
+  });
+
+  group('inverso y tramos', () {
+    test('inverse rodea el texto con GS B 1 y GS B 0', () {
+      final bytes = (EscPosBuilder(
+        paper: PaperWidth.mm80,
+      )..text('I', inverse: true)).build();
+      expect(bytes, [esc, 0x61, 0, gs, 0x42, 1, 0x49, gs, 0x42, 0]);
+    });
+
+    test('el inverso es el último en activarse y el primero en apagarse', () {
+      final bytes =
+          (EscPosBuilder(paper: PaperWidth.mm80)..text(
+                'T',
+                align: EscPosAlign.right,
+                bold: true,
+                underline: true,
+                doubleHeight: true,
+                inverse: true,
+              ))
+              .build();
+      expect(bytes, [
+        esc, 0x61, 2, // derecha
+        esc, 0x45, 1, // negrita on
+        esc, 0x2D, 1, // subrayado on
+        gs, 0x21, 0x01, // doble alto
+        gs, 0x42, 1, // inverso on
+        0x54,
+        gs, 0x42, 0,
+        gs, 0x21, 0x00,
+        esc, 0x2D, 0,
+        esc, 0x45, 0,
+      ]);
+    });
+
+    test('line, paragraph, row y columns2 aceptan inverse', () {
+      final b = EscPosBuilder(paper: PaperWidth.mm58)
+        ..line('a', inverse: true)
+        ..paragraph('b c', inverse: true)
+        ..row([const Column('d', width: 4)], inverse: true)
+        ..columns2('e', 'f', inverse: true);
+      final decoded = decodeEscPos(b.build());
+      expect(decoded.texts, ['a', 'b c', 'd   ', 'e${' ' * 30}f']);
+      expect(decoded.lines.map((l) => l.inverse), everyElement(isTrue));
+    });
+
+    test('lineRuns: un tramo normal y otro en inverso en la misma línea', () {
+      final bytes =
+          (EscPosBuilder(paper: PaperWidth.mm80)..lineRuns(
+                const [TextRun('   > '), TextRun('sin cebolla', inverse: true)],
+                bold: true,
+                doubleHeight: true,
+              ))
+              .build();
+      expect(bytes, [
+        esc, 0x61, 0, // alineación, una vez por línea
+        esc, 0x45, 1, gs, 0x21, 0x01, // atributos de la línea
+        ...ascii('   > '),
+        gs, 0x21, 0, esc, 0x45, 0,
+        esc, 0x45, 1, gs, 0x21, 0x01, // atributos de la línea
+        gs, 0x42, 1, // inverso solo en este tramo
+        ...ascii('sin cebolla'),
+        gs, 0x42, 0,
+        gs, 0x21, 0, esc, 0x45, 0,
+        lf,
+      ]);
+      final line = decodeEscPos(bytes).lines.single;
+      expect(line.text, '   > sin cebolla');
+      expect(line.runs.map((r) => r.inverse), [false, true]);
+      expect(line.inverse, isTrue);
+      expect(line.bold, isTrue);
+      expect(line.doubleHeight, isTrue);
+    });
+
+    test(
+      'lineRuns respeta la alineación y sin tramos deja una línea vacía',
+      () {
+        expect(
+          (EscPosBuilder(
+            paper: PaperWidth.mm80,
+          )..lineRuns(const [TextRun('x')], align: EscPosAlign.center)).build(),
+          [esc, 0x61, 1, 0x78, lf],
+        );
+        final bytes = (EscPosBuilder(
+          paper: PaperWidth.mm80,
+        )..lineRuns(const [], align: EscPosAlign.right)).build();
+        expect(bytes, [esc, 0x61, 2, lf]);
+        expect(decodeEscPos(bytes).lines.single.align, 2);
+      },
+    );
+
+    test('TextRun: igualdad por valor', () {
+      expect(const TextRun('a'), const TextRun('a', inverse: false));
+      expect(const TextRun('a'), isNot(const TextRun('a', inverse: true)));
+    });
+  });
+
+  group('EscPosBuilder.banda', () {
+    test('rellena hasta 48 columnas en 80 mm, 42 a 180 ppp y 32 en 58 mm', () {
+      for (final paper in PaperWidth.values) {
+        final decoded = decodeEscPos(
+          (EscPosBuilder(paper: paper)..banda('ESPERAR')).build(),
+        );
+        final line = decoded.lines.single;
+        expect(line.text.runes.length, paper.columns, reason: paper.name);
+        expect(line.text, startsWith(' '));
+        expect(line.text.trim(), 'ESPERAR');
+        expect(line.inverse, isTrue);
+        expect(line.bold, isTrue);
+        expect(line.doubleHeight, isFalse);
+        expect(line.doubleWidth, isFalse);
+        expect(line.align, 0, reason: 'el relleno centra; la impresora no');
+      }
+    });
+
+    test(
+      'secuencia exacta: ESC a 0, ESC E 1, GS B 1, texto, GS B 0, ESC E 0',
+      () {
+        final bytes = (EscPosBuilder(
+          paper: PaperWidth.mm58,
+        )..banda('X')).build();
+        expect(bytes, [
+          esc,
+          0x61,
+          0,
+          esc,
+          0x45,
+          1,
+          gs,
+          0x42,
+          1,
+          ...ascii(fitRunes('X', 32, EscPosAlign.center)),
+          gs,
+          0x42,
+          0,
+          esc,
+          0x45,
+          0,
+          lf,
+        ]);
+      },
+    );
+
+    test('en doble ancho rellena hasta 24, 21 y 16 columnas', () {
+      for (final paper in PaperWidth.values) {
+        final bytes = (EscPosBuilder(
+          paper: paper,
+        )..banda('DUPLICADO', doubleHeight: true, doubleWidth: true)).build();
+        expect(_indexOf(bytes, [gs, 0x21, 0x11, gs, 0x42, 1]), isNonNegative);
+        final line = decodeEscPos(bytes).lines.single;
+        expect(line.text.runes.length, paper.columns ~/ 2, reason: paper.name);
+        expect(line.printedWidth, paper.columns);
+        expect(line.doubleWidth, isTrue);
+        expect(line.doubleHeight, isTrue);
+        expect(line.inverse, isTrue);
+      }
+    });
+
+    test('a 42 columnas: 42 en anchura normal y 21 en doble ancho', () {
+      final normal = decodeEscPos(
+        (EscPosBuilder(paper: PaperWidth.mm80Dpi180)..banda('ESPERAR')).build(),
+      ).lines.single;
+      expect(normal.text.runes.length, 42);
+      expect(normal.text.trim(), 'ESPERAR');
+      expect(normal.inverse, isTrue);
+
+      final doble = decodeEscPos(
+        (EscPosBuilder(
+              paper: PaperWidth.mm80Dpi180,
+            )..banda('MARCHAR SEGUNDOS', doubleHeight: true, doubleWidth: true))
+            .build(),
+      ).lines.single;
+      expect(doble.text.runes.length, 21);
+      expect(doble.printedWidth, 42);
+      expect(doble.text.trim(), 'MARCHAR SEGUNDOS');
+      expect(doble.inverse, isTrue);
+      expect(doble.doubleHeight, isTrue);
+      expect(doble.doubleWidth, isTrue);
+    });
+
+    test('parte los textos largos por palabras', () {
+      final decoded = decodeEscPos(
+        (EscPosBuilder(
+          paper: PaperWidth.mm58,
+        )..banda('REIMPRESIÓN · PREPARAR', doubleWidth: true)).build(),
+      );
+      expect(decoded.texts.map((t) => t.trim()), ['REIMPRESIÓN ·', 'PREPARAR']);
+      for (final line in decoded.lines) {
+        expect(line.text.runes.length, 16);
+        expect(line.inverse, isTrue);
+      }
+    });
+  });
+
+  group('avisos sonoros y cajón', () {
+    test('pitido = ESC B n t', () {
+      expect((EscPosBuilder(paper: PaperWidth.mm80)..pitido()).build(), [
+        esc,
+        0x42,
+        2,
+        2,
+      ]);
+      expect(
+        (EscPosBuilder(
+          paper: PaperWidth.mm80,
+        )..pitido(veces: 3, duracion: 5)).build(),
+        [esc, 0x42, 3, 5],
+      );
+    });
+
+    test('pitido rechaza 0 y 9, en veces y en duración', () {
+      final b = EscPosBuilder(paper: PaperWidth.mm80);
+      for (final n in [0, 9]) {
+        expect(
+          () => b.pitido(veces: n),
+          throwsA(isA<ValidationException>()),
+          reason: 'veces $n',
+        );
+        expect(
+          () => b.pitido(duracion: n),
+          throwsA(isA<ValidationException>()),
+          reason: 'duración $n',
+        );
+      }
+      expect(b.build(), isEmpty, reason: 'un fallo no deja bytes a medias');
+    });
+
+    test('pulsoZumbadorCajon: pin 5 (m = 1) por defecto y pin 2 (m = 0)', () {
+      const pulso5 = [esc, 0x70, 1, 0x32, 0x64];
+      const pulso2 = [esc, 0x70, 0, 0x32, 0x64];
+      expect(
+        (EscPosBuilder(paper: PaperWidth.mm80)..pulsoZumbadorCajon()).build(),
+        pulso5,
+      );
+      expect(
+        (EscPosBuilder(
+          paper: PaperWidth.mm80,
+        )..pulsoZumbadorCajon(veces: 3)).build(),
+        [...pulso5, ...pulso5, ...pulso5],
+      );
+      expect(
+        (EscPosBuilder(
+          paper: PaperWidth.mm80,
+        )..pulsoZumbadorCajon(pin: 2)).build(),
+        pulso2,
+      );
+    });
+
+    test('pulsoZumbadorCajon rechaza veces fuera de 1..3 y otros pines', () {
+      final b = EscPosBuilder(paper: PaperWidth.mm80);
+      for (final veces in [0, 4]) {
+        expect(
+          () => b.pulsoZumbadorCajon(veces: veces),
+          throwsA(isA<ValidationException>()),
+        );
+      }
+      for (final pin in [0, 1, 3, 4]) {
+        expect(
+          () => b.pulsoZumbadorCajon(pin: pin),
+          throwsA(isA<ValidationException>()),
+        );
+      }
+      expect(b.build(), isEmpty);
+    });
+
+    test('bytesAviso en los tres modos', () {
+      expect(bytesAviso(ZumbadorModo.ninguno), isEmpty);
+      expect(bytesAviso(ZumbadorModo.ninguno, pitidos: 0, pin: 9), isEmpty);
+
+      expect(bytesAviso(ZumbadorModo.generico), [esc, 0x42, 2, 2]);
+      expect(bytesAviso(ZumbadorModo.generico, pitidos: 5), [esc, 0x42, 5, 2]);
+      // Se acota al rango del comando.
+      expect(bytesAviso(ZumbadorModo.generico, pitidos: 0), [esc, 0x42, 1, 2]);
+      expect(bytesAviso(ZumbadorModo.generico, pitidos: 20), [esc, 0x42, 8, 2]);
+
+      // Por defecto dos pitidos → dos pulsos por el pin 5.
+      expect(bytesAviso(ZumbadorModo.puertoCajon), [
+        esc,
+        0x70,
+        1,
+        0x32,
+        0x64,
+        esc,
+        0x70,
+        1,
+        0x32,
+        0x64,
+      ]);
+      expect(bytesAviso(ZumbadorModo.puertoCajon, pitidos: 1), [
+        esc,
+        0x70,
+        1,
+        0x32,
+        0x64,
+      ]);
+      expect(bytesAviso(ZumbadorModo.puertoCajon, pitidos: 20, pin: 2), [
+        esc,
+        0x70,
+        0,
+        0x32,
+        0x64,
+        esc,
+        0x70,
+        0,
+        0x32,
+        0x64,
+        esc,
+        0x70,
+        0,
+        0x32,
+        0x64,
+      ]);
+      expect(
+        () => bytesAviso(ZumbadorModo.puertoCajon, pin: 3),
+        throwsA(isA<ValidationException>()),
+      );
+    });
+
+    test('bytesAbrirCajon = ESC p 0 25 250, igual que openDrawer', () {
+      expect(bytesAbrirCajon(), [esc, 0x70, 0, 25, 250]);
+      expect(
+        bytesAbrirCajon(),
+        (EscPosBuilder(paper: PaperWidth.mm58)..openDrawer()).build(),
+      );
+      expect(decodeEscPos(bytesAbrirCajon()).named('drawer'), hasLength(1));
     });
   });
 

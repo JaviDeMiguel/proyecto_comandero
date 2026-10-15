@@ -21,6 +21,11 @@ import 'invoice_models.dart';
 /// Cobro mixto ([TicketFactura.esCobroMixto]): tras crear (sin `pagada`) se
 /// reconcilian los recibos con el plan de cobro ([FsCobroMixto]) y después
 /// se emite. El cobro simple sigue el flujo de siempre.
+///
+/// El resultado lleva la fecha y hora y el total de la factura **en FS**
+/// ([ResultadoFactura.fecha], [ResultadoFactura.totalFsCents]): si el
+/// documento devuelto no los trae se relee la factura una vez y, si siguen
+/// faltando, quedan nulos (nunca se sustituyen por los del ticket).
 final class FsInvoiceService {
   FsInvoiceService(this._api) : _cobroMixto = FsCobroMixto(_api);
 
@@ -118,15 +123,24 @@ final class FsInvoiceService {
       }
     }
 
+    // Fecha y total de FS: son los de la factura impresa y su QR, nunca los
+    // del ticket (el ERP puede cambiar fecha y hora al rellenar un hueco de
+    // numeración). Lo que siga faltando tras releer queda nulo.
+    doc = await _completarFechaYTotal(doc, idfactura);
+    final fecha = _fechaDe(doc);
+    if (fecha == null) {
+      avisos.add('FacturaScripts no devolvió la fecha de la factura');
+    }
+
     // Verificación de totales: la verdad es la de FS, pero una discrepancia
     // con el TPV se avisa (nunca se repite la factura).
     final totalFs = doc.fsDouble('total');
-    final totalCents = totalFs == null ? null : centsFromDecimal(totalFs);
-    if (totalCents == null) {
+    final totalFsCents = totalFs == null ? null : centsFromDecimal(totalFs);
+    if (totalFsCents == null) {
       avisos.add('FacturaScripts no devolvió el total de la factura');
-    } else if (totalCents != ticket.totalEsperadoCents) {
+    } else if (totalFsCents != ticket.totalEsperadoCents) {
       avisos.add(
-        'Total FacturaScripts ${formatCents(totalCents)} ≠ TPV '
+        'Total FacturaScripts ${formatCents(totalFsCents)} ≠ TPV '
         '${formatCents(ticket.totalEsperadoCents)}',
       );
     }
@@ -169,7 +183,9 @@ final class FsInvoiceService {
       idfactura: idfactura,
       codigo: doc.fsRequireString('codigo'),
       numero: doc.fsString('numero') ?? '',
-      totalCents: totalCents ?? ticket.totalEsperadoCents,
+      fecha: fecha,
+      totalCents: totalFsCents ?? ticket.totalEsperadoCents,
+      totalFsCents: totalFsCents,
       pagada: pagada,
       idasiento: idasiento,
       emitida: emitida,
@@ -177,6 +193,26 @@ final class FsInvoiceService {
       avisos: List.unmodifiable(avisos),
       recibos: recibos,
     );
+  }
+
+  /// Devuelve [doc] completado con una única relectura de la factura si no
+  /// trae la fecha o el total. Si tampoco los trae el GET, siguen faltando.
+  Future<FsRecord> _completarFechaYTotal(FsRecord doc, int idfactura) async {
+    if (_fechaDe(doc) != null && doc.fsDouble('total') != null) return doc;
+    _log.fine(
+      'Factura $idfactura sin fecha o total en la respuesta: releyendo',
+    );
+    return {...doc, ...?await _releer(idfactura)};
+  }
+
+  /// Fecha y hora de la factura en FS (`fecha` `dd-MM-yyyy` más `hora`
+  /// `HH:mm:ss`; sin `hora`, las 00:00:00). `null` si falta la fecha o no se
+  /// puede interpretar.
+  static DateTime? _fechaDe(FsRecord doc) {
+    final fecha = doc.fsNonEmptyString('fecha');
+    if (fecha == null) return null;
+    final hora = doc.fsNonEmptyString('hora') ?? '00:00:00';
+    return fsParseDate('$fecha $hora');
   }
 
   /// Campos del formulario de `crearFacturaCliente`. Nunca se envían

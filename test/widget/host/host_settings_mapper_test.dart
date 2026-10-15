@@ -2,9 +2,27 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:proyecto_comandero/features/host/domain/host_settings.dart'
     as host;
 import 'package:proyecto_comandero/features/host/presentation/host_settings_mapper.dart';
+import 'package:proyecto_comandero/features/impresion/domain/formato_impresion.dart';
 import 'package:proyecto_comandero/features/sala/domain/enrutamiento_comandas.dart';
 import 'package:proyecto_comandero/features/sala/domain/linea_comanda.dart';
+import 'package:proyecto_comandero/features/sala/domain/pases.dart';
 import 'package:proyecto_comandero/features/settings/domain/app_settings.dart';
+
+const FormatoImpresion formato = FormatoImpresion(
+  perfiles: {
+    RolImpresora.cocina: PerfilImpresora(
+      papel: PaperWidth.mm80,
+      copias: 2,
+      direccion: '10.0.0.20:9100',
+    ),
+  },
+  ticket: FormatoTicket(
+    nombreComercial: 'BAR MANOLO',
+    mostrarComensales: false,
+  ),
+  emision: EmisionTicket(modo: ModoEmision.facturaAlCobrar, esperaSegundos: 15),
+  pases: PasesConfig(nombres: ['Entrantes', 'Principales']),
+);
 
 void main() {
   test('mapea todos los campos equivalentes de AppSettings', () {
@@ -56,6 +74,7 @@ void main() {
           porFamilia: {'BEB': DestinoPreparacion.barra},
           porDefecto: DestinoPreparacion.barra,
         ),
+        formato: formato,
       ),
       reposicion: const ReposicionSettings(
         automatica: false,
@@ -109,7 +128,15 @@ void main() {
           porFamilia: {'BEB': DestinoPreparacion.barra},
           porDefecto: DestinoPreparacion.barra,
         ),
+        formato: formato,
       ),
+    );
+    // El formato se copia tal cual: perfiles, ticket, emisión, QR y pases.
+    expect(s.impresion.formato, formato);
+    expect(s.impresion.pases, formato.pases);
+    expect(
+      s.impresion.perfilPara(cocina),
+      formato.perfiles[RolImpresora.cocina],
     );
     expect(
       s.reposicion,
@@ -137,6 +164,8 @@ void main() {
     expect(s.fiscal.idempresa, kIdEmpresaPorDefecto);
     expect(s.cierre.modoAsientoZ, ModoAsientoZ.soloDescuadre);
     expect(s.impresion.hayImpresora, isFalse);
+    expect(s.impresion.formato, const FormatoImpresion());
+    expect(s.impresion.pases, const PasesConfig());
     expect(s.mesas, AppSettings.mesasPorDefecto());
   });
 

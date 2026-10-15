@@ -5,8 +5,22 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:proyecto_comandero/app/theme.dart';
 import 'package:proyecto_comandero/core/errors/app_exception.dart';
+import 'package:proyecto_comandero/core/fiscal/verifactu_qr.dart'
+    show EntornoVerifactu, ModoQrVerifactu;
+import 'package:proyecto_comandero/core/isolates/escpos/escpos_builder.dart'
+    show ZumbadorModo;
+import 'package:proyecto_comandero/core/isolates/escpos/escpos_decoder.dart'
+    show decodeEscPos;
+import 'package:proyecto_comandero/features/impresion/domain/formato_impresion.dart';
+import 'package:proyecto_comandero/features/sala/domain/enrutamiento_comandas.dart'
+    show EnrutamientoComandas;
+import 'package:proyecto_comandero/features/sala/domain/linea_comanda.dart'
+    show DestinoPreparacion;
+import 'package:proyecto_comandero/features/sala/domain/pases.dart'
+    show PasesConfig;
 import 'package:proyecto_comandero/features/settings/data/in_memory_settings_repository.dart';
 import 'package:proyecto_comandero/features/settings/domain/app_settings.dart';
+import 'package:proyecto_comandero/features/settings/presentation/pagina_prueba_impresora.dart';
 import 'package:proyecto_comandero/features/settings/presentation/settings_diagnostics.dart';
 import 'package:proyecto_comandero/features/settings/presentation/settings_page.dart';
 import 'package:proyecto_comandero/features/settings/presentation/settings_providers.dart';
@@ -68,6 +82,7 @@ void main() {
     WidgetTester tester,
     AppSettings ajustes, {
     Set<String> Function()? mesasOcupadas,
+    void Function(BuildContext context)? onAbrirEnrutamiento,
   }) async {
     tester.view
       ..physicalSize = const Size(1000, 1400)
@@ -82,7 +97,10 @@ void main() {
         ],
         child: MaterialApp(
           theme: AppTheme.light(),
-          home: SettingsPage(mesasOcupadas: mesasOcupadas),
+          home: SettingsPage(
+            mesasOcupadas: mesasOcupadas,
+            onAbrirEnrutamiento: onAbrirEnrutamiento,
+          ),
         ),
       ),
     );
@@ -384,28 +402,298 @@ void main() {
     expect(guardados.mysql!.password, 'secreto');
   });
 
-  testWidgets('Ticket de prueba se envía a la impresora escrita', (
-    tester,
-  ) async {
-    await montar(tester, ajustesHost());
+  group('impresoras', () {
+    final cocina = PrinterEndpoint('10.0.0.5', port: 9101);
 
-    await escribir(tester, 'impresora-cocina', '10.0.0.5:9101');
-    await pulsar(tester, find.text('Papel 58 mm'));
-    await pulsar(tester, campo('prueba-cocina'));
+    /// Formato con un perfil de [papel] guardado para la impresora [cocina].
+    FormatoImpresion perfilCocina(PaperWidth papel) => FormatoImpresion(
+      perfiles: {
+        RolImpresora.cocina: PerfilImpresora(
+          papel: papel,
+          direccion: claveImpresora(cocina),
+        ),
+      },
+    );
 
-    final (endpoint, data) = diagnostics.impresiones.single;
-    expect(endpoint, PrinterEndpoint('10.0.0.5', port: 9101));
-    expect(data.destino, 'Cocina');
-    expect(data.paper, PaperWidth.mm58);
-    expect(find.text('Página de prueba enviada a Cocina'), findsOneWidget);
+    /// Reglas de enrutamiento: solo las escribe su pantalla (§7.1).
+    const rutas = EnrutamientoComandas(
+      porFamilia: {'BEB': DestinoPreparacion.barra},
+    );
 
-    diagnostics.fallo = const PrinterException('Impresora apagada');
-    await pulsar(tester, campo('prueba-cocina'));
-    expect(find.text('Impresora apagada'), findsOneWidget);
+    ProviderContainer contenedor(WidgetTester tester) =>
+        ProviderScope.containerOf(tester.element(find.byType(SettingsPage)));
 
-    await escribir(tester, 'impresora-barra', 'impresora barra');
-    await pulsar(tester, campo('prueba-barra'));
-    expect(diagnostics.impresiones, hasLength(1));
+    PaperWidth ultimoPapel() => diagnostics.impresiones.last.$2.paper;
+
+    testWidgets('Ticket de prueba se envía a la impresora escrita con el papel '
+        'de su perfil', (tester) async {
+      await montar(
+        tester,
+        ajustesHost().copyWith(
+          impresion: PrintingSettings(formato: perfilCocina(PaperWidth.mm58)),
+        ),
+      );
+      // El papel ya no se elige aquí: es del perfil de cada impresora.
+      expect(campo('papel'), findsNothing);
+      expect(find.text('Papel 58 mm'), findsNothing);
+
+      // La dirección escrita (aún sin guardar) es la que se resuelve.
+      await escribir(tester, 'impresora-cocina', '10.0.0.5:9101');
+      await pulsar(tester, campo('prueba-cocina'));
+
+      final (endpoint, data) = diagnostics.impresiones.single;
+      expect(endpoint, cocina);
+      expect(data.destino, 'Cocina');
+      expect(data.impresora, '10.0.0.5:9101');
+      expect(data.paper, PaperWidth.mm58);
+      expect(find.text('Página de prueba enviada a Cocina'), findsOneWidget);
+      // La página enviada lleva el papel y una regla del ancho de 58 mm.
+      final lineas = decodeEscPos(generarPaginaPrueba(data)).texts;
+      expect(lineas, contains('Papel: 58 mm, 32 columnas'));
+      expect(lineas, contains('12345678901234567890123456789012'));
+
+      diagnostics.fallo = const PrinterException('Impresora apagada');
+      await pulsar(tester, campo('prueba-cocina'));
+      expect(find.text('Impresora apagada'), findsOneWidget);
+      diagnostics.fallo = null;
+
+      await escribir(tester, 'impresora-barra', 'impresora barra');
+      await pulsar(tester, campo('prueba-barra'));
+      expect(diagnostics.impresiones, hasLength(1));
+      // Un campo ilegible cuenta como vacío: no impide probar los demás.
+      await pulsar(tester, campo('prueba-cocina'));
+      expect(diagnostics.impresiones, hasLength(2));
+      expect(ultimoPapel(), PaperWidth.mm58);
+    });
+
+    testWidgets('la prueba resuelve el perfil de la impresora física con las '
+        'direcciones escritas y el formato vigente', (tester) async {
+      await montar(
+        tester,
+        ajustesHost().copyWith(
+          impresion: PrintingSettings(
+            paper: PaperWidth.mm58,
+            formato: perfilCocina(PaperWidth.mm80Dpi180),
+          ),
+        ),
+      );
+      await escribir(tester, 'impresora-tickets', '10.0.0.9');
+      await escribir(tester, 'impresora-cocina', '10.0.0.5:9101');
+
+      // Sin perfil para su dirección: el papel heredado de los ajustes.
+      await pulsar(tester, campo('prueba-tickets'));
+      expect(ultimoPapel(), PaperWidth.mm58);
+      await pulsar(tester, campo('prueba-cocina'));
+      expect(ultimoPapel(), PaperWidth.mm80Dpi180);
+
+      // La barra escrita con la dirección de cocina sale por esa impresora:
+      // usa su perfil.
+      await escribir(tester, 'impresora-barra', '10.0.0.5:9101');
+      await pulsar(tester, campo('prueba-barra'));
+      expect(diagnostics.impresiones.last.$1, cocina);
+      expect(ultimoPapel(), PaperWidth.mm80Dpi180);
+
+      // «Tickets y comandas» guarda otro perfil con esta pantalla abierta:
+      // la siguiente prueba ya lo usa.
+      await contenedor(tester)
+          .read(appSettingsProvider.notifier)
+          .actualizar(
+            (s) => s.copyWith(
+              impresion: s.impresion.copyWith(
+                formato: perfilCocina(PaperWidth.mm80),
+              ),
+            ),
+          );
+      await asentar(tester);
+      await pulsar(tester, campo('prueba-cocina'));
+      expect(ultimoPapel(), PaperWidth.mm80);
+      expect(diagnostics.impresiones, hasLength(4));
+    });
+
+    testWidgets('guardar no toca el papel heredado y conserva el formato y el '
+        'enrutamiento precargados', (tester) async {
+      final formato = FormatoImpresion(
+        perfiles: {
+          RolImpresora.cocina: PerfilImpresora(
+            papel: PaperWidth.mm80Dpi180,
+            lineasIniciales: 2,
+            copias: 2,
+            zumbador: ZumbadorModo.generico,
+            pitidos: 3,
+            direccion: claveImpresora(cocina),
+          ),
+        },
+        ticket: const FormatoTicket(
+          nombreComercial: 'BAR MANOLO',
+          pie: 'Gracias por su visita',
+          mostrarComensales: false,
+        ),
+        emision: const EmisionTicket(
+          modo: ModoEmision.facturaAlCobrar,
+          esperaSegundos: 5,
+        ),
+        verifactu: const QrVerifactuConfig(
+          modo: ModoQrVerifactu.verifactu,
+          entorno: EntornoVerifactu.pruebas,
+        ),
+        pases: const PasesConfig(marcharAlEnviar: false),
+      );
+      expect(formato.esPorDefecto, isFalse);
+      expect(rutas, isNot(const EnrutamientoComandas()));
+      final repo = await montar(
+        tester,
+        ajustesHost().copyWith(
+          impresion: PrintingSettings(
+            cocina: cocina,
+            paper: PaperWidth.mm58,
+            enrutamiento: rutas,
+            formato: formato,
+          ),
+        ),
+      );
+
+      await escribir(tester, 'impresora-tickets', '10.0.0.7');
+      await pulsar(tester, campo('abrir-cajon'));
+      await guardar(tester);
+      await cerrarResumen(tester);
+
+      final impresion = (await repo.load())!.impresion;
+      expect(impresion.tickets, PrinterEndpoint('10.0.0.7'));
+      expect(impresion.cocina, cocina);
+      expect(impresion.abrirCajon, isFalse);
+      expect(impresion.paper, PaperWidth.mm58);
+      expect(impresion.enrutamiento, rutas);
+      expect(impresion.formato, formato);
+    });
+
+    testWidgets('guardar conserva el formato, el enrutamiento y el papel que '
+        'otras pantallas guardaron con esta abierta', (tester) async {
+      final repo = await montar(tester, ajustesHost());
+      final nuevo = perfilCocina(PaperWidth.mm58);
+      final ajustes = contenedor(tester).read(appSettingsProvider.notifier);
+
+      await escribir(tester, 'nombre', 'Caja 4');
+      // El enrutamiento, abierto desde aquí, guarda sus reglas.
+      await ajustes.actualizar(
+        (s) => s.copyWith(impresion: s.impresion.copyWith(enrutamiento: rutas)),
+      );
+      await ajustes.actualizar(
+        (s) => s.copyWith(
+          impresion: s.impresion.copyWith(
+            paper: PaperWidth.mm58,
+            formato: nuevo,
+          ),
+        ),
+      );
+      await asentar(tester);
+      await guardar(tester);
+      await cerrarResumen(tester);
+
+      final guardados = (await repo.load())!;
+      expect(guardados.deviceName, 'Caja 4');
+      expect(guardados.impresion.paper, PaperWidth.mm58);
+      expect(guardados.impresion.enrutamiento, rutas);
+      expect(guardados.impresion.formato, nuevo);
+    });
+
+    /// Lo que guardan los interruptores: (ticket, comandas, cajón).
+    (bool, bool, bool) interruptores(PrintingSettings impresion) => (
+      impresion.imprimirTicketAlCobrar,
+      impresion.imprimirComandaCocina,
+      impresion.abrirCajon,
+    );
+
+    for (final (clave, esperado) in const [
+      ('imprimir-ticket', (false, true, true)),
+      ('imprimir-comanda', (true, false, true)),
+      ('abrir-cajon', (true, true, false)),
+    ]) {
+      testWidgets('el interruptor $clave solo cambia su campo', (tester) async {
+        final repo = await montar(tester, ajustesHost());
+        expect(interruptores(ajustesHost().impresion), (true, true, true));
+
+        await pulsar(tester, campo(clave));
+        expect(tester.widget<SwitchListTile>(campo(clave)).value, isFalse);
+        await guardar(tester);
+        await cerrarResumen(tester);
+
+        expect(interruptores((await repo.load())!.impresion), esperado);
+      });
+    }
+
+    testWidgets('una dirección de impresora ilegible impide guardar', (
+      tester,
+    ) async {
+      final repo = await montar(tester, ajustesHost());
+      final guardadosAntes = repo.saveCount;
+
+      await escribir(tester, 'impresora-barra', 'impresora barra');
+      await guardar(tester);
+
+      expect(find.text('La dirección no puede tener espacios'), findsOneWidget);
+      expect(find.text('Revisa los campos marcados en rojo'), findsOneWidget);
+      expect(repo.saveCount, guardadosAntes);
+
+      await escribir(tester, 'impresora-barra', '10.0.0.6');
+      await guardar(tester);
+      await cerrarResumen(tester);
+      expect((await repo.load())!.impresion.barra, PrinterEndpoint('10.0.0.6'));
+    });
+
+    testWidgets('el acceso al enrutamiento avisa con su nombre si hay cambios '
+        'sin guardar', (tester) async {
+      const aviso =
+          'Guarda antes los cambios de esta pantalla: el enrutamiento usa las '
+          'impresoras guardadas';
+      var abiertas = 0;
+      await montar(
+        tester,
+        ajustesHost(),
+        onAbrirEnrutamiento: (_) => abiertas++,
+      );
+
+      await pulsar(tester, campo('enrutamiento'));
+      expect(abiertas, 1);
+      expect(find.text(aviso), findsNothing);
+
+      await escribir(tester, 'impresora-cocina', '10.0.0.5');
+      await pulsar(tester, campo('enrutamiento'));
+      expect(abiertas, 2);
+      expect(find.text(aviso), findsOneWidget);
+    });
+  });
+
+  test('la página de prueba indica el papel y lleva una regla del ancho '
+      'completo, sin líneas que se salgan del papel', () {
+    for (final papel in PaperWidth.values) {
+      final lineas = decodeEscPos(
+        generarPaginaPrueba(
+          PaginaPruebaData(
+            paper: papel,
+            destino: 'Cocina',
+            impresora: '192.168.100.200:9100',
+            dispositivo: 'Caja 1',
+            fechaHora: '14/10/2026 12:00:00',
+          ),
+        ),
+      ).lines;
+      final textos = [for (final linea in lineas) linea.text];
+      expect(
+        textos,
+        contains('Papel: ${papel.etiqueta}, ${papel.columns} columnas'),
+        reason: papel.name,
+      );
+      final regla = textos.singleWhere((t) => RegExp(r'^\d+$').hasMatch(t));
+      expect(regla, hasLength(papel.columns), reason: papel.name);
+      expect(regla, startsWith('12345678901'), reason: papel.name);
+      for (final linea in lineas) {
+        expect(
+          linea.printedWidth,
+          lessThanOrEqualTo(papel.columns),
+          reason: '${papel.name}: «${linea.text}»',
+        );
+      }
+    }
   });
 
   testWidgets('Mesas: añade mesas conservando las existentes y no deja quitar '

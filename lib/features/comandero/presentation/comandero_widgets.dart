@@ -5,10 +5,21 @@ import '../../../core/network/protocol/transport_messages.dart';
 import '../domain/comandero_exceptions.dart';
 import '../domain/comandero_state.dart';
 
+/// Texto que muestra el comandero cuando el host no conoce la petición
+/// (`error unknown_type`): es de una versión anterior a esa función.
+const String kMensajeHostAntiguo =
+    'El TPV no admite esta función: actualiza la aplicación del TPV';
+
 /// Texto apto para la interfaz a partir de un error.
+///
+/// Los rechazos de sala ([ComanderoSalaException], incluidos los de pase
+/// `pase_no_valido` y `pase_sin_lineas`) se muestran con el mensaje del
+/// host; un `unknown_type` (host de una versión anterior) se traduce a
+/// [kMensajeHostAntiguo].
 String describirError(Object error) => switch (error) {
   ComanderoSalaException(:final message) => message,
   SinConexionException(:final message) => message,
+  RemoteRequestException(code: ErrorCodes.unknownType) => kMensajeHostAntiguo,
   AppException(:final message) => message,
   StateError() => 'El comandero se está reiniciando; inténtalo de nuevo',
   _ => error.toString(),

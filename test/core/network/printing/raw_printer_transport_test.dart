@@ -28,9 +28,32 @@ const PrinterTransportOptions _fastOptions = PrinterTransportOptions(
   closeTimeout: Duration(seconds: 1),
 );
 
-/// Socket que acepta escrituras pero nunca confirma el `flush`: simula una
-/// impresora cuya ventana TCP se ha cerrado (sin papel, colgada).
-final class _StuckSocket implements Socket {
+/// Socket simulado con `flush` y `close` programables, para provocar fallos
+/// deterministas después de conectar (los de antes de conectar se simulan
+/// con el conector inyectado).
+final class _ScriptedSocket implements Socket {
+  _ScriptedSocket({required this.onFlush, required this.onClose});
+
+  /// Acepta escrituras pero nunca confirma el `flush`: simula una impresora
+  /// cuya ventana TCP se ha cerrado (sin papel, colgada).
+  factory _ScriptedSocket.stuck() {
+    final never = Completer<void>();
+    return _ScriptedSocket(
+      onFlush: () => never.future,
+      onClose: () => never.future,
+    );
+  }
+
+  /// Acepta todos los datos y falla al cerrar: la impresora corta la
+  /// conexión (RST) justo al terminar el envío.
+  factory _ScriptedSocket.resetOnClose() => _ScriptedSocket(
+    onFlush: () => Future<void>.value(),
+    onClose: () =>
+        Future<void>.error(const SocketException('Connection reset by peer')),
+  );
+
+  final Future<void> Function() onFlush;
+  final Future<void> Function() onClose;
   bool destroyed = false;
   final StreamController<Uint8List> _incoming = StreamController<Uint8List>();
   final Completer<void> _never = Completer<void>();
@@ -39,13 +62,13 @@ final class _StuckSocket implements Socket {
   void add(List<int> data) {}
 
   @override
-  Future<void> flush() => _never.future;
+  Future<void> flush() => onFlush();
 
   @override
   Future<void> get done => _never.future;
 
   @override
-  Future<void> close() => _never.future;
+  Future<void> close() => onClose();
 
   @override
   bool setOption(SocketOption option, bool enabled) => true;
@@ -224,32 +247,35 @@ void main() {
     });
   });
 
-  group('EscPosSocketPrinter: fallos', () {
-    test('conexión rechazada -> PrinterException con host:port', () async {
-      // Reservar un puerto efímero y liberarlo garantiza que está cerrado.
-      final probe = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
-      final endpoint = PrinterEndpoint('127.0.0.1', port: probe.port);
-      await probe.close();
-      // Windows reintenta el SYN tras el RST y tarda unos 2 s en informar del
-      // rechazo: el timeout debe ser holgado para que la causa sea el rechazo
-      // y no nuestro propio temporizador.
-      final transport = EscPosSocketPrinter(
-        options: const PrinterTransportOptions(
-          connectTimeout: Duration(seconds: 15),
-          writeTimeout: Duration(seconds: 2),
-          closeTimeout: Duration(seconds: 1),
-        ),
-      );
+  group('EscPosSocketPrinter: fallos de conexión (PrinterConnectException)', () {
+    test(
+      'conexión rechazada -> PrinterConnectException con host:port',
+      () async {
+        // Reservar un puerto efímero y liberarlo garantiza que está cerrado.
+        final probe = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+        final endpoint = PrinterEndpoint('127.0.0.1', port: probe.port);
+        await probe.close();
+        // Windows reintenta el SYN tras el RST y tarda unos 2 s en informar del
+        // rechazo: el timeout debe ser holgado para que la causa sea el rechazo
+        // y no nuestro propio temporizador.
+        final transport = EscPosSocketPrinter(
+          options: const PrinterTransportOptions(
+            connectTimeout: Duration(seconds: 15),
+            writeTimeout: Duration(seconds: 2),
+            closeTimeout: Duration(seconds: 1),
+          ),
+        );
 
-      await expectLater(
-        transport.send(endpoint, _pattern(10)),
-        throwsA(
-          isA<PrinterException>()
-              .having((e) => e.message, 'message', contains('$endpoint'))
-              .having((e) => e.cause, 'cause', isA<SocketException>()),
-        ),
-      );
-    });
+        await expectLater(
+          transport.send(endpoint, _pattern(10)),
+          throwsA(
+            isA<PrinterConnectException>()
+                .having((e) => e.message, 'message', contains('$endpoint'))
+                .having((e) => e.cause, 'cause', isA<SocketException>()),
+          ),
+        );
+      },
+    );
 
     test('timeout de conexión con un conector que nunca responde', () async {
       final endpoint = PrinterEndpoint('10.255.255.1');
@@ -263,7 +289,7 @@ void main() {
       await expectLater(
         transport.send(endpoint, _pattern(10)),
         throwsA(
-          isA<PrinterException>()
+          isA<PrinterConnectException>()
               .having((e) => e.message, 'message', contains('$endpoint'))
               .having((e) => e.message, 'message', contains('no responde'))
               .having((e) => e.cause, 'cause', isA<TimeoutException>()),
@@ -283,18 +309,46 @@ void main() {
       await expectLater(
         transport.send(endpoint, _pattern(10)),
         throwsA(
-          isA<PrinterException>()
+          isA<PrinterConnectException>()
               .having((e) => e.message, 'message', contains('$endpoint'))
               .having((e) => e.cause, 'cause', isA<SocketException>()),
         ),
       );
     });
 
+    test('un error no tipado del conector también es de conexión', () async {
+      final endpoint = PrinterEndpoint('192.168.1.78');
+      final transport = EscPosSocketPrinter(
+        options: _fastOptions,
+        connector: (host, port, {timeout}) => throw Exception('conector roto'),
+      );
+
+      await expectLater(
+        transport.send(endpoint, _pattern(10)),
+        throwsA(
+          isA<PrinterConnectException>()
+              .having((e) => e.message, 'message', contains('$endpoint'))
+              .having((e) => e.message, 'message', contains('conector roto'))
+              .having((e) => e.cause, 'cause', isA<Exception>()),
+        ),
+      );
+    });
+
+    test('es un subtipo de PrinterException: los `on PrinterException` de hoy '
+        'siguen capturándola', () {
+      const error = PrinterConnectException('sin conexión');
+      expect(error, isA<PrinterException>());
+      expect(error, isA<AppException>());
+      expect(error.toString(), 'PrinterConnectException: sin conexión');
+    });
+  });
+
+  group('EscPosSocketPrinter: fallos tras conectar (PrinterException)', () {
     test(
       'timeout de escritura cuando la impresora deja de aceptar datos',
       () async {
         final endpoint = PrinterEndpoint('192.168.1.77');
-        final stuck = _StuckSocket();
+        final stuck = _ScriptedSocket.stuck();
         final transport = EscPosSocketPrinter(
           options: const PrinterTransportOptions(
             connectTimeout: Duration(seconds: 1),
@@ -307,38 +361,81 @@ void main() {
         await expectLater(
           transport.send(endpoint, _pattern(10)),
           throwsA(
-            isA<PrinterException>()
-                .having((e) => e.message, 'message', contains('$endpoint'))
-                .having(
-                  (e) => e.message,
-                  'message',
-                  contains('dejó de aceptar datos'),
-                )
-                .having((e) => e.cause, 'cause', isA<TimeoutException>()),
+            allOf(
+              _isFailureAfterConnect,
+              isA<PrinterException>()
+                  .having((e) => e.message, 'message', contains('$endpoint'))
+                  .having(
+                    (e) => e.message,
+                    'message',
+                    contains('dejó de aceptar datos'),
+                  )
+                  .having((e) => e.cause, 'cause', isA<TimeoutException>()),
+            ),
           ),
         );
         expect(stuck.destroyed, isTrue, reason: 'destroy() siempre en finally');
       },
     );
 
-    test('la impresora corta a mitad de trabajo -> PrinterException', () async {
-      // Con un trabajo mucho mayor que los búferes TCP de loopback el cliente
-      // aún está escribiendo cuando llega el RST.
-      final printer = await FakePrinter.start(cutAfterBytes: 1);
-      addTearDown(printer.close);
-      final transport = EscPosSocketPrinter(options: _fastOptions);
+    test(
+      'la impresora corta la conexión al cerrar -> fallo de cierre',
+      () async {
+        final endpoint = PrinterEndpoint('192.168.1.79');
+        final socket = _ScriptedSocket.resetOnClose();
+        final transport = EscPosSocketPrinter(
+          options: _fastOptions,
+          connector: (host, port, {timeout}) async => socket,
+        );
 
-      await expectLater(
-        transport.send(printer.endpoint, _pattern(8 << 20)),
-        throwsA(
-          isA<PrinterException>().having(
-            (e) => e.message,
-            'message',
-            contains('${printer.endpoint}'),
+        await expectLater(
+          transport.send(endpoint, _pattern(10)),
+          throwsA(
+            allOf(
+              _isFailureAfterConnect,
+              isA<PrinterException>()
+                  .having((e) => e.message, 'message', contains('$endpoint'))
+                  .having(
+                    (e) => e.message,
+                    'message',
+                    contains('al terminar el envío'),
+                  )
+                  .having((e) => e.cause, 'cause', isA<SocketException>()),
+            ),
           ),
-        ),
-      );
-    });
+        );
+        expect(
+          socket.destroyed,
+          isTrue,
+          reason: 'destroy() siempre en finally',
+        );
+      },
+    );
+
+    test(
+      'la impresora corta a mitad de trabajo -> fallo de escritura',
+      () async {
+        // Con un trabajo mucho mayor que los búferes TCP de loopback el cliente
+        // aún está escribiendo cuando llega el RST.
+        final printer = await FakePrinter.start(cutAfterBytes: 1);
+        addTearDown(printer.close);
+        final transport = EscPosSocketPrinter(options: _fastOptions);
+
+        await expectLater(
+          transport.send(printer.endpoint, _pattern(8 << 20)),
+          throwsA(
+            allOf(
+              _isFailureAfterConnect,
+              isA<PrinterException>().having(
+                (e) => e.message,
+                'message',
+                contains('${printer.endpoint}'),
+              ),
+            ),
+          ),
+        );
+      },
+    );
 
     test('la impresora cierra ordenadamente antes de tiempo', () async {
       // Un servidor que cierra sin leer: el cliente ve EOF (o RST) y debe
@@ -362,8 +459,16 @@ void main() {
 
       await expectLater(
         transport.send(endpoint, _pattern(4 << 20)),
-        throwsA(isA<PrinterException>()),
+        throwsA(_isFailureAfterConnect),
       );
     });
   });
 }
+
+/// Fallo posterior a la conexión: una [PrinterException] que no es de
+/// conexión, porque parte del trabajo pudo haber salido y una factura no debe
+/// reintentarlo.
+final Matcher _isFailureAfterConnect = allOf(
+  isA<PrinterException>(),
+  isNot(isA<PrinterConnectException>()),
+);

@@ -2,6 +2,7 @@ import 'package:equatable/equatable.dart';
 
 import '../../../core/money/money.dart';
 import '../../../core/utils/json_map.dart';
+import '../../../core/utils/json_tolerante.dart';
 
 /// Ciclo de vida de una línea de comanda.
 enum EstadoLinea {
@@ -41,6 +42,10 @@ enum DestinoPreparacion {
 /// Los precios se congelan al pedir (el catálogo puede cambiar después):
 /// [pvpUnitarioCents] es lo que ve el cliente y [pvpUnitarioNeto] +
 /// [codimpuesto] es lo que se enviará a FacturaScripts al facturar.
+///
+/// [pase] y [envio] son posteriores a la primera versión del diario: se leen
+/// de forma tolerante y solo se escriben cuando no son nulos, de modo que un
+/// JSON antiguo se reescribe igual.
 final class LineaComanda extends Equatable {
   const LineaComanda({
     required this.id,
@@ -58,6 +63,8 @@ final class LineaComanda extends Equatable {
     required this.creadaEn,
     this.anuladaEn,
     this.motivoAnulacion,
+    this.pase,
+    this.envio,
   });
 
   factory LineaComanda.fromJson(Map<String, Object?> json) => LineaComanda(
@@ -81,6 +88,10 @@ final class LineaComanda extends Equatable {
       null => null,
     },
     motivoAnulacion: json.optionalString('motivoAnulacion'),
+    // Un valor ausente, de otro tipo o no positivo se lee como «directo» y
+    // «sin nº de envío»: nunca invalida la línea.
+    pase: enteroPositivoTolerante(json['pase']),
+    envio: enteroPositivoTolerante(json['envio']),
   );
 
   final String id;
@@ -111,12 +122,25 @@ final class LineaComanda extends Equatable {
   final DateTime? anuladaEn;
   final String? motivoAnulacion;
 
+  /// Pase de la línea: `null` = directa (sale sin esperar a ninguna marcha);
+  /// `1..n` = posición, en base 1, en `PasesConfig.nombres`. Un pase fuera
+  /// de la configuración se conserva y se rotula «Pase N».
+  final int? pase;
+
+  /// Nº de envío del turno en el que el host aceptó la línea (`null` en las
+  /// líneas de un diario anterior a este campo o aún no aceptadas).
+  final int? envio;
+
   bool get anulada => estado == EstadoLinea.anulada;
 
   /// Importe con IVA de la línea (`0` si está anulada).
   int get importeCents =>
       anulada ? 0 : lineTotalCents(pvpUnitarioCents, cantidad);
 
+  /// Copia con cambios; cubre todos los campos salvo la identidad ([id],
+  /// [referencia], [descripcion] y [creadaEn]). [codimpuesto] y [pase]
+  /// reciben un getter para poder dejarlos a `null`: `pase: () => null`
+  /// devuelve la línea a «directa».
   LineaComanda copyWith({
     EstadoLinea? estado,
     DateTime? anuladaEn,
@@ -124,22 +148,31 @@ final class LineaComanda extends Equatable {
     String? nota,
     double? cantidad,
     DestinoPreparacion? destino,
+    int? pvpUnitarioCents,
+    double? pvpUnitarioNeto,
+    int? ivaBp,
+    String? Function()? codimpuesto,
+    String? camarero,
+    int? Function()? pase,
+    int? envio,
   }) => LineaComanda(
     id: id,
     referencia: referencia,
     descripcion: descripcion,
     cantidad: cantidad ?? this.cantidad,
-    pvpUnitarioCents: pvpUnitarioCents,
-    pvpUnitarioNeto: pvpUnitarioNeto,
-    ivaBp: ivaBp,
-    codimpuesto: codimpuesto,
+    pvpUnitarioCents: pvpUnitarioCents ?? this.pvpUnitarioCents,
+    pvpUnitarioNeto: pvpUnitarioNeto ?? this.pvpUnitarioNeto,
+    ivaBp: ivaBp ?? this.ivaBp,
+    codimpuesto: codimpuesto == null ? this.codimpuesto : codimpuesto(),
     nota: nota ?? this.nota,
     estado: estado ?? this.estado,
     destino: destino ?? this.destino,
-    camarero: camarero,
+    camarero: camarero ?? this.camarero,
     creadaEn: creadaEn,
     anuladaEn: anuladaEn ?? this.anuladaEn,
     motivoAnulacion: motivoAnulacion ?? this.motivoAnulacion,
+    pase: pase == null ? this.pase : pase(),
+    envio: envio ?? this.envio,
   );
 
   /// Devuelve la línea anulada; una línea ya anulada se devuelve tal cual.
@@ -167,6 +200,8 @@ final class LineaComanda extends Equatable {
     'creadaEn': creadaEn.toIso8601String(),
     if (anuladaEn != null) 'anuladaEn': anuladaEn!.toIso8601String(),
     if (motivoAnulacion != null) 'motivoAnulacion': motivoAnulacion,
+    if (pase != null) 'pase': pase,
+    if (envio != null) 'envio': envio,
   };
 
   @override
@@ -186,5 +221,7 @@ final class LineaComanda extends Equatable {
     creadaEn,
     anuladaEn,
     motivoAnulacion,
+    pase,
+    envio,
   ];
 }

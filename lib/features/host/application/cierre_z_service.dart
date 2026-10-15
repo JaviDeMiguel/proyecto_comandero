@@ -57,10 +57,11 @@ final class CierreZPreview extends Equatable {
 /// Turno de caja y Cierre Z.
 ///
 /// El informe y el asiento los calcula el motor de `core/isolates/cierre_z`
-/// con los tickets del turno. Al cerrar se archiva el resumen, se vacían los
-/// tickets del turno, se encola el asiento (si procede) y se imprime el
-/// informe. El asiento se contabiliza con [AccountingPort] de forma
-/// idempotente (clave `documento`).
+/// con los tickets del turno. Al cerrar se archiva el resumen (con las
+/// precuentas de las mesas vaciadas sin cobrar), se vacían los tickets del
+/// turno, se reinicia el nº de envío, se encola el asiento (si procede) y se
+/// imprime el informe. El asiento se contabiliza con [AccountingPort] de
+/// forma idempotente (clave `documento`).
 final class CierreZService {
   CierreZService({
     required this._store,
@@ -175,7 +176,15 @@ final class CierreZService {
 
   /// Cierra el turno: archiva el resumen, retira del turno los tickets que
   /// entraron en el informe, encola el asiento si tiene partidas y se pudo
-  /// resolver, imprime el informe Z.
+  /// resolver, imprime el informe Z. Devuelve (y emite en [cierres]) el
+  /// resumen tal como queda archivado: el primero de [historial].
+  ///
+  /// En la misma escritura del diario que archiva el resumen, el nº de envío
+  /// vuelve a 1 y las precuentas de las mesas vaciadas sin cobrar pasan de
+  /// `HostSnapshot.precuentasSinCobro` a [ResumenCierre.precuentasSinCobro].
+  /// Se leen dentro de esa escritura: una mesa vaciada mientras se calculaba
+  /// el cierre entra en este Z. Las comandas abiertas conservan sus números
+  /// de envío y sus precuentas.
   ///
   /// Los tickets cobrados (y las retiradas anotadas) mientras se calculaba
   /// el cierre no entran en este Z y se quedan para el siguiente turno. Dos
@@ -251,7 +260,10 @@ final class CierreZService {
     );
 
     final incluidos = {for (final t in tickets) t.id};
-    // El cierre archivado y su asiento se guardan en la misma escritura.
+    // El cierre archivado y su asiento se guardan en la misma escritura, con
+    // el reinicio del nº de envío y las precuentas sin cobro, que se leen
+    // aquí dentro para no perder las de una mesa vaciada durante el cálculo.
+    late final ResumenCierre archivado;
     await _store.update((s) {
       final actual = s.cierreAbierto;
       // Turno que sigue tras el cierre: el abierto durante el cálculo, o uno
@@ -268,6 +280,7 @@ final class CierreZService {
           retiradasCents: actual.retiradasCents - abierto.retiradasCents,
         );
       }
+      archivado = resumen.copyWith(precuentasSinCobro: s.precuentasSinCobro);
       final cerrado = s.copyWith(
         ticketsTurno: [
           for (final t in s.ticketsTurno)
@@ -276,9 +289,11 @@ final class CierreZService {
         cerrarTurno: siguiente == null,
         cierreAbierto: siguiente,
         historialCierres: [
-          resumen,
+          archivado,
           ...s.historialCierres.take(HostSnapshot.maxHistorialCierres - 1),
         ],
+        numeroEnvioSiguiente: 1,
+        precuentasSinCobro: const [],
       );
       if (!contabilizar) return cerrado;
       return _outbox.encolarEn(cerrado, SyncJobTipo.asientoZ, {
@@ -293,7 +308,8 @@ final class CierreZService {
     _log.info(
       'Cierre ${resumen.id}: ${informe.numTickets} tickets, '
       '${formatCents(informe.ventasTotalCents)}, descuadre '
-      '${formatCents(informe.descuadreCents)}',
+      '${formatCents(informe.descuadreCents)}, '
+      '${archivado.precuentasSinCobro.length} precuentas sin cobro',
     );
 
     if (contabilizar) {
@@ -311,9 +327,12 @@ final class CierreZService {
       );
     }
 
-    await _printing.imprimirInformeZ(preview.result);
-    if (!_cierres.isClosed) _cierres.add(resumen);
-    return resumen;
+    await _printing.imprimirInformeZ(
+      preview.result,
+      precuentasSinCobro: archivado.precuentasSinCobro,
+    );
+    if (!_cierres.isClosed) _cierres.add(archivado);
+    return archivado;
   }
 
   // ---------------------------------------------------------------------------

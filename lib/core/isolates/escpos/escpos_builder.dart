@@ -21,21 +21,45 @@ const int _gs = 0x1D;
 const int _lf = 0x0A;
 
 /// Anchura del rollo de papel. Determina las columnas de texto en fuente
-/// normal (fuente A, 12 puntos por carácter) y los puntos de imagen por línea.
+/// normal (fuente A, 12 puntos por carácter), los puntos de imagen por línea
+/// y la resolución del cabezal, que fija el tamaño físico de un raster.
+///
+/// El valor JSON es `name`. El valor `mm80Dpi180` solo se guarda en el perfil
+/// de cada impresora (`impresion.formato.perfiles.*.papel`), nunca en el papel
+/// heredado `impresion.paper`, para que una versión anterior de la aplicación
+/// no encuentre un nombre que no conoce.
 enum PaperWidth {
   /// Rollo de 58 mm: 32 columnas, 384 puntos (48 mm imprimibles a 8 puntos/mm).
-  mm58(columns: 32, dots: 384),
+  mm58(columns: 32, dots: 384, dpi: 203, etiqueta: '58 mm'),
 
   /// Rollo de 80 mm: 48 columnas, 576 puntos (72 mm imprimibles).
-  mm80(columns: 48, dots: 576);
+  mm80(columns: 48, dots: 576, dpi: 203, etiqueta: '80 mm'),
 
-  const PaperWidth({required this.columns, required this.dots});
+  /// Rollo de 80 mm a 180 ppp (Epson TM-T88 y compatibles): 42 columnas y 512
+  /// puntos con la fuente A de 12 puntos.
+  mm80Dpi180(columns: 42, dots: 512, dpi: 180, etiqueta: '80 mm (180 ppp)');
+
+  const PaperWidth({
+    required this.columns,
+    required this.dots,
+    required this.dpi,
+    required this.etiqueta,
+  });
 
   /// Caracteres por línea en fuente normal.
   final int columns;
 
   /// Puntos (píxeles) por línea para imágenes raster.
   final int dots;
+
+  /// Resolución del cabezal en puntos por pulgada.
+  final int dpi;
+
+  /// Texto para la interfaz («58 mm», «80 mm»).
+  final String etiqueta;
+
+  /// Puntos por milímetro: 7,99 a 203 ppp y 7,09 a 180 ppp.
+  double get puntosPorMm => dpi / 25.4;
 }
 
 /// Alineación horizontal (`ESC a n`).
@@ -94,6 +118,20 @@ final class Column extends Equatable {
   List<Object?> get props => [text, width, align, wrap];
 }
 
+/// Tramo de una línea compuesta ([EscPosBuilder.lineRuns]): texto que
+/// comparte los atributos de la línea y solo decide si va en inverso.
+final class TextRun extends Equatable {
+  const TextRun(this.text, {this.inverse = false});
+
+  final String text;
+
+  /// Blanco sobre negro (`GS B 1`) solo en este tramo.
+  final bool inverse;
+
+  @override
+  List<Object?> get props => [text, inverse];
+}
+
 /// Constructor incremental de un documento ESC/POS.
 ///
 /// El orden de las llamadas es el orden de impresión. Todos los textos pasan
@@ -106,18 +144,23 @@ final class EscPosBuilder {
 
   final BytesBuilder _bytes = BytesBuilder(copy: false);
 
-  /// `ESC @` (reinicia modos) seguido de `ESC t 19` (página de códigos CP858).
+  /// `ESC @` (reinicia modos), `ESC t 19` (página de códigos CP858) y
+  /// `ESC R 0` (juego de caracteres internacional de EE. UU.).
   ///
   /// Se selecciona la página en el init porque `ESC @` la devuelve a la de
-  /// fábrica (normalmente CP437, sin acentos ni euro).
+  /// fábrica (normalmente CP437, sin acentos ni euro). El juego internacional
+  /// va después: una impresora configurada para «Spain I/II» sustituye
+  /// `# @ [ \ ] { | }` por otros signos, y con el juego de EE. UU. esos bytes
+  /// imprimen lo que dice la tabla CP858.
   void init() {
-    _bytes.add(const [_esc, 0x40, _esc, 0x74, 19]);
+    _bytes.add(const [_esc, 0x40, _esc, 0x74, 19, _esc, 0x52, 0]);
   }
 
   /// Escribe texto con los atributos indicados, sin salto de línea final.
   ///
-  /// Los atributos se activan antes del texto y se desactivan después, para
-  /// que cada llamada sea independiente del estado que dejó la anterior.
+  /// Los atributos se activan antes del texto (alineación, negrita, subrayado,
+  /// tamaño e inverso, en ese orden) y se desactivan después en orden inverso,
+  /// para que cada llamada sea independiente del estado que dejó la anterior.
   void text(
     String value, {
     EscPosAlign align = EscPosAlign.left,
@@ -125,18 +168,17 @@ final class EscPosBuilder {
     bool doubleHeight = false,
     bool doubleWidth = false,
     bool underline = false,
+    bool inverse = false,
   }) {
     _setAlign(align);
-    if (bold) _bytes.add(const [_esc, 0x45, 1]);
-    if (underline) _bytes.add(const [_esc, 0x2D, 1]);
-    final sizeByte = _sizeByte(doubleHeight, doubleWidth);
-    if (sizeByte != 0) _bytes.add([_gs, 0x21, sizeByte]);
-
-    _bytes.add(encodeCp858(value));
-
-    if (sizeByte != 0) _bytes.add(const [_gs, 0x21, 0]);
-    if (underline) _bytes.add(const [_esc, 0x2D, 0]);
-    if (bold) _bytes.add(const [_esc, 0x45, 0]);
+    _writeRun(
+      value,
+      bold: bold,
+      underline: underline,
+      doubleHeight: doubleHeight,
+      doubleWidth: doubleWidth,
+      inverse: inverse,
+    );
   }
 
   /// Texto seguido de LF (imprime la línea y avanza).
@@ -147,6 +189,7 @@ final class EscPosBuilder {
     bool doubleHeight = false,
     bool doubleWidth = false,
     bool underline = false,
+    bool inverse = false,
   }) {
     text(
       value,
@@ -155,8 +198,63 @@ final class EscPosBuilder {
       doubleHeight: doubleHeight,
       doubleWidth: doubleWidth,
       underline: underline,
+      inverse: inverse,
     );
     _bytes.addByte(_lf);
+  }
+
+  /// Línea compuesta por tramos que comparten alineación, negrita y tamaño y
+  /// que solo se distinguen por el inverso: la nota destacada de una comanda
+  /// («   > » normal y el texto de la nota en inverso).
+  ///
+  /// Quien la llama parte antes el texto en filas que quepan en el papel. Por
+  /// cada tramo se emiten los atributos de la línea, `GS B 1` si el tramo va
+  /// en inverso, el texto y la desactivación; al final, LF.
+  void lineRuns(
+    List<TextRun> runs, {
+    EscPosAlign align = EscPosAlign.left,
+    bool bold = false,
+    bool doubleHeight = false,
+    bool doubleWidth = false,
+  }) {
+    _setAlign(align);
+    for (final run in runs) {
+      _writeRun(
+        run.text,
+        bold: bold,
+        underline: false,
+        doubleHeight: doubleHeight,
+        doubleWidth: doubleWidth,
+        inverse: run.inverse,
+      );
+    }
+    _bytes.addByte(_lf);
+  }
+
+  /// Barra negra a todo el ancho del papel con [texto] centrado en blanco
+  /// (ESPERAR, DOCUMENTO PROVISIONAL, DUPLICADO, MARCHAR, ANULACIÓN,
+  /// REIMPRESIÓN, MUESTRA).
+  ///
+  /// Cada fila de `wrapWords(texto, columnas)` se imprime alineada a la
+  /// izquierda, en negrita e inverso, y **rellenada con espacios** hasta las
+  /// columnas disponibles (la mitad en doble ancho), de modo que el fondo
+  /// negro sea continuo. Su texto decodificado empieza, por tanto, por los
+  /// espacios del relleno.
+  void banda(
+    String texto, {
+    bool doubleHeight = false,
+    bool doubleWidth = false,
+  }) {
+    final columns = _columnsFor(doubleWidth);
+    for (final row in wrapWords(texto, columns)) {
+      line(
+        fitRunes(row, columns, EscPosAlign.center),
+        bold: true,
+        doubleHeight: doubleHeight,
+        doubleWidth: doubleWidth,
+        inverse: true,
+      );
+    }
   }
 
   /// Texto largo partido en líneas de la anchura del papel (por palabras).
@@ -166,6 +264,7 @@ final class EscPosBuilder {
     bool bold = false,
     bool doubleHeight = false,
     bool doubleWidth = false,
+    bool inverse = false,
   }) {
     final width = _columnsFor(doubleWidth);
     for (final row in wrapWords(value, width)) {
@@ -175,6 +274,7 @@ final class EscPosBuilder {
         bold: bold,
         doubleHeight: doubleHeight,
         doubleWidth: doubleWidth,
+        inverse: inverse,
       );
     }
   }
@@ -190,6 +290,7 @@ final class EscPosBuilder {
     bool bold = false,
     bool doubleHeight = false,
     bool doubleWidth = false,
+    bool inverse = false,
   }) {
     if (cells.isEmpty) {
       throw const ValidationException(
@@ -236,6 +337,7 @@ final class EscPosBuilder {
         bold: bold,
         doubleHeight: doubleHeight,
         doubleWidth: doubleWidth,
+        inverse: inverse,
       );
     }
   }
@@ -252,6 +354,7 @@ final class EscPosBuilder {
     bool bold = false,
     bool doubleHeight = false,
     bool doubleWidth = false,
+    bool inverse = false,
   }) {
     final width = _columnsFor(doubleWidth);
     final rightText = truncateRunes(right, width);
@@ -265,12 +368,14 @@ final class EscPosBuilder {
         bold: bold,
         doubleHeight: doubleHeight,
         doubleWidth: doubleWidth,
+        inverse: inverse,
       );
       line(
         fitRunes(rightText, width, EscPosAlign.right),
         bold: bold,
         doubleHeight: doubleHeight,
         doubleWidth: doubleWidth,
+        inverse: inverse,
       );
       return;
     }
@@ -286,6 +391,7 @@ final class EscPosBuilder {
         bold: bold,
         doubleHeight: doubleHeight,
         doubleWidth: doubleWidth,
+        inverse: inverse,
       );
     }
   }
@@ -322,6 +428,37 @@ final class EscPosBuilder {
   /// pin 2, 50 ms activo (25 × 2 ms), 500 ms de reposo.
   void openDrawer() {
     _bytes.add(const [_esc, 0x70, 0x00, 0x19, 0xFA]);
+  }
+
+  /// Pitido del zumbador interno (`ESC B n t`): [veces] pitidos de
+  /// [duracion] × 50 ms.
+  ///
+  /// Es el comando de facto de los clones (Xprinter, GPrinter…); Epson y Star
+  /// no lo definen, y una impresora sin `ESC B` trata `n` y `t` como datos.
+  /// Por eso ambos se limitan a 1..8: un 9 (`0x09`) sería un tabulador que la
+  /// impresora ejecutaría. Lanza [ValidationException] fuera de ese rango.
+  void pitido({int veces = 2, int duracion = 2}) {
+    _requireRange(veces, 1, 8, 'El número de pitidos');
+    _requireRange(duracion, 1, 8, 'La duración del pitido');
+    _bytes.add([_esc, 0x42, veces, duracion]);
+  }
+
+  /// Zumbador externo conectado al puerto del cajón: [veces] pulsos
+  /// `ESC p m 50 100` (100 ms encendido, 200 ms apagado) por el [pin] 5
+  /// (m = 1) o el pin 2 (m = 0).
+  ///
+  /// Por defecto va por el pin 5, que no dispara un cajón conectado al pin 2.
+  /// Lanza [ValidationException] si [veces] no está en 1..3 o [pin] no es
+  /// 2 ni 5.
+  void pulsoZumbadorCajon({int veces = 1, int pin = 5}) {
+    _requireRange(veces, 1, 3, 'El número de pulsos del zumbador');
+    if (pin != 2 && pin != 5) {
+      throw ValidationException('El pin del zumbador es $pin: debe ser 2 o 5');
+    }
+    final m = pin == 5 ? 1 : 0;
+    for (var i = 0; i < veces; i++) {
+      _bytes.add([_esc, 0x70, m, 0x32, 0x64]);
+    }
   }
 
   /// Imagen de 1 bit con `GS v 0` (raster bit image) en bandas de hasta 255
@@ -426,10 +563,80 @@ final class EscPosBuilder {
     _bytes.add([_esc, 0x61, align.code]);
   }
 
+  /// Un tramo de texto con sus atributos activados antes y desactivados
+  /// después (sin alineación, que es de la línea).
+  void _writeRun(
+    String value, {
+    required bool bold,
+    required bool underline,
+    required bool doubleHeight,
+    required bool doubleWidth,
+    required bool inverse,
+  }) {
+    if (bold) _bytes.add(const [_esc, 0x45, 1]);
+    if (underline) _bytes.add(const [_esc, 0x2D, 1]);
+    final sizeByte = _sizeByte(doubleHeight, doubleWidth);
+    if (sizeByte != 0) _bytes.add([_gs, 0x21, sizeByte]);
+    if (inverse) _bytes.add(const [_gs, 0x42, 1]);
+
+    _bytes.add(encodeCp858(value));
+
+    if (inverse) _bytes.add(const [_gs, 0x42, 0]);
+    if (sizeByte != 0) _bytes.add(const [_gs, 0x21, 0]);
+    if (underline) _bytes.add(const [_esc, 0x2D, 0]);
+    if (bold) _bytes.add(const [_esc, 0x45, 0]);
+  }
+
+  static void _requireRange(int value, int min, int max, String what) {
+    if (value < min || value > max) {
+      throw ValidationException(
+        '$what es $value: debe estar entre $min y $max',
+      );
+    }
+  }
+
   /// `GS ! n`: bits 4-7 multiplicador de anchura − 1, bits 0-3 de altura − 1.
   static int _sizeByte(bool doubleHeight, bool doubleWidth) =>
       (doubleWidth ? 0x10 : 0) | (doubleHeight ? 0x01 : 0);
 }
+
+/// Aviso sonoro de un documento de preparación (comanda, MARCHAR, anulación,
+/// reimpresión), según el perfil de la impresora.
+enum ZumbadorModo {
+  /// Sin aviso.
+  ninguno,
+
+  /// Zumbador interno con `ESC B` ([EscPosBuilder.pitido]).
+  generico,
+
+  /// Zumbador externo en el puerto del cajón
+  /// ([EscPosBuilder.pulsoZumbadorCajon]).
+  puertoCajon,
+}
+
+/// Bytes del aviso sonoro (vacío si [modo] es `ninguno`). Es pura: el canal
+/// de impresión los añade al final de un trabajo sin pasar por un generador.
+///
+/// [pitidos] se acota al rango de cada comando (1..8 con `generico`, 1..3 con
+/// `puertoCajon`); [pin] solo cuenta con `puertoCajon` y debe ser 2 o 5
+/// ([ValidationException] si no).
+Uint8List bytesAviso(ZumbadorModo modo, {int pitidos = 2, int pin = 5}) {
+  final b = EscPosBuilder(paper: PaperWidth.mm80);
+  switch (modo) {
+    case ZumbadorModo.ninguno:
+      break;
+    case ZumbadorModo.generico:
+      b.pitido(veces: pitidos.clamp(1, 8), duracion: 2);
+    case ZumbadorModo.puertoCajon:
+      b.pulsoZumbadorCajon(veces: pitidos.clamp(1, 3), pin: pin);
+  }
+  return b.build();
+}
+
+/// `ESC p 0 25 250` suelto, los mismos bytes que [EscPosBuilder.openDrawer]:
+/// el trabajo propio de abrir el cajón cuando no acompaña a un documento.
+Uint8List bytesAbrirCajon() =>
+    (EscPosBuilder(paper: PaperWidth.mm80)..openDrawer()).build();
 
 // ---------------------------------------------------------------------------
 // Utilidades de maquetación. Trabajan con runas (puntos de código) porque cada

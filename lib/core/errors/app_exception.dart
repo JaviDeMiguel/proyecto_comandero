@@ -159,6 +159,14 @@ base class PrinterException extends AppException {
   const PrinterException(super.message, {super.cause});
 }
 
+/// No se pudo establecer la conexión con la impresora (rechazo, timeout, host
+/// desconocido): no se envió ningún byte, así que repetir el trabajo no puede
+/// duplicar nada. Los fallos posteriores a la conexión (escritura, cierre) son
+/// [PrinterException] a secas, porque parte del ticket pudo haber salido.
+final class PrinterConnectException extends PrinterException {
+  const PrinterConnectException(super.message, {super.cause});
+}
+
 /// Datos de negocio inválidos: receta cíclica, merma fuera de rango, asiento
 /// descuadrado, importe negativo, etc.
 base class ValidationException extends AppException {

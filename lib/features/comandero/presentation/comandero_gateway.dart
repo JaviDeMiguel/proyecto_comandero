@@ -1,6 +1,7 @@
 import '../../../core/facturascripts/catalog/catalog_models.dart';
 import '../../../core/network/discovery/udp_discovery_scanner.dart';
 import '../../sala/domain/comanda.dart';
+import '../../sala/domain/pases.dart';
 import '../../sala/protocol/sala_messages.dart';
 import '../application/comandero_controller.dart';
 import '../domain/comandero_config.dart';
@@ -33,7 +34,13 @@ abstract interface class ComanderoGateway {
   /// Catálogo vigente (del host o de la caché).
   CatalogSnapshot? get catalogo;
 
-  /// Peticiones fiables en cola o sin respuesta del host.
+  /// Configuración de pases que publica el host en el snapshot; `null` con
+  /// un host antiguo. La interfaz de pases y los botones «Marchar» solo se
+  /// muestran si `pases?.activos == true`.
+  PasesConfig? get pases;
+
+  /// Peticiones fiables (comandas, anulaciones, marchas) en cola o sin
+  /// respuesta del host.
   int get pendientes;
 
   PedidoEnEdicion pedido(String mesaId);
@@ -52,11 +59,13 @@ abstract interface class ComanderoGateway {
     required String? hostManual,
   });
 
+  /// Añade el artículo al carrito con el [pase] indicado (`null` = directo).
   PedidoEnEdicion anadir(
     String mesaId,
     ArticuloCatalogo articulo, {
     double cantidad = 1,
     String? nota,
+    int? pase,
   });
   PedidoEnEdicion cambiarCantidad(
     String mesaId,
@@ -65,12 +74,14 @@ abstract interface class ComanderoGateway {
   );
   PedidoEnEdicion cambiarNota(String mesaId, String lineaId, String? nota);
 
-  /// Cambia cantidad y nota de una línea en una sola edición.
+  /// Cambia cantidad, nota y, si se pasa [pase], el pase de una línea en una
+  /// sola edición (`pase: () => null` la vuelve directa).
   PedidoEnEdicion editarLinea(
     String mesaId,
     String lineaId, {
     required double cantidad,
     required String? nota,
+    int? Function()? pase,
   });
   PedidoEnEdicion quitar(String mesaId, String lineaId);
   PedidoEnEdicion vaciar(String mesaId);
@@ -87,6 +98,15 @@ abstract interface class ComanderoGateway {
     int? comensales,
   });
   Future<Comanda> anularLinea(String mesaId, String lineaId, {String? motivo});
+
+  /// Marcha un pase de la comanda abierta (petición fiable con `marchaId`
+  /// propio y el `comandaId` de la comanda que ve el comandero).
+  Future<Comanda> marcharPase(String mesaId, int pase);
+
+  /// Fija los comensales de la comanda abierta (envío fiable sin líneas con
+  /// su `comandaId`). En una mesa libre no se usa: el valor va en el primer
+  /// [enviar] con `comensales`.
+  Future<Comanda> fijarComensales(String mesaId, int comensales);
   Future<Comanda> pedirCuenta(String mesaId, {bool solicitada = true});
   Future<void> refrescarSala();
 
@@ -123,6 +143,9 @@ final class ControllerComanderoGateway implements ComanderoGateway {
 
   @override
   CatalogSnapshot? get catalogo => controller.catalogo;
+
+  @override
+  PasesConfig? get pases => controller.pases;
 
   @override
   int get pendientes => controller.pendientes;
@@ -168,7 +191,14 @@ final class ControllerComanderoGateway implements ComanderoGateway {
     ArticuloCatalogo articulo, {
     double cantidad = 1,
     String? nota,
-  }) => controller.anadir(mesaId, articulo, cantidad: cantidad, nota: nota);
+    int? pase,
+  }) => controller.anadir(
+    mesaId,
+    articulo,
+    cantidad: cantidad,
+    nota: nota,
+    pase: pase,
+  );
 
   @override
   PedidoEnEdicion cambiarCantidad(
@@ -187,7 +217,14 @@ final class ControllerComanderoGateway implements ComanderoGateway {
     String lineaId, {
     required double cantidad,
     required String? nota,
-  }) => controller.editarLinea(mesaId, lineaId, cantidad: cantidad, nota: nota);
+    int? Function()? pase,
+  }) => controller.editarLinea(
+    mesaId,
+    lineaId,
+    cantidad: cantidad,
+    nota: nota,
+    pase: pase,
+  );
 
   @override
   PedidoEnEdicion quitar(String mesaId, String lineaId) =>
@@ -216,6 +253,14 @@ final class ControllerComanderoGateway implements ComanderoGateway {
     String lineaId, {
     String? motivo,
   }) => controller.anularLinea(mesaId, lineaId, motivo: motivo);
+
+  @override
+  Future<Comanda> marcharPase(String mesaId, int pase) =>
+      controller.marcharPase(mesaId, pase);
+
+  @override
+  Future<Comanda> fijarComensales(String mesaId, int comensales) =>
+      controller.fijarComensales(mesaId, comensales);
 
   @override
   Future<Comanda> pedirCuenta(String mesaId, {bool solicitada = true}) =>

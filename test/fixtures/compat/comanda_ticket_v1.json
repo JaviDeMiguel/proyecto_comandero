@@ -1,0 +1,166 @@
+{
+  "comanda": {
+    "id": "c-7f3a",
+    "mesaId": "mesa-7",
+    "abiertaEn": "2026-10-09T21:02:11.000",
+    "lineas": [
+      {
+        "id": "l1",
+        "referencia": "CROQ",
+        "descripcion": "Croquetas de jamón",
+        "cantidad": 2.0,
+        "pvpUnitarioCents": 450,
+        "pvpUnitarioNeto": 4.09091,
+        "ivaBp": 1000,
+        "codimpuesto": "IVA10",
+        "estado": "enviada",
+        "destino": "cocina",
+        "camarero": "Ana",
+        "creadaEn": "2026-10-09T21:13:58.000"
+      },
+      {
+        "id": "l2",
+        "referencia": "CANA",
+        "descripcion": "Caña",
+        "cantidad": 4.0,
+        "pvpUnitarioCents": 200,
+        "pvpUnitarioNeto": 1.81818,
+        "ivaBp": 1000,
+        "codimpuesto": "IVA10",
+        "nota": "sin espuma\n\"doble\"",
+        "estado": "servida",
+        "destino": "barra",
+        "camarero": "Ana",
+        "creadaEn": "2026-10-09T21:14:02.000"
+      },
+      {
+        "id": "l3",
+        "referencia": "GINT",
+        "descripcion": "Gin-tonic",
+        "cantidad": 1.0,
+        "pvpUnitarioCents": 900,
+        "pvpUnitarioNeto": 7.43802,
+        "ivaBp": 2100,
+        "estado": "enviada",
+        "destino": "barra",
+        "creadaEn": "2026-10-09T21:40:30.000"
+      },
+      {
+        "id": "l4",
+        "referencia": "AGUA",
+        "descripcion": "Agua 50 cl",
+        "cantidad": 1.0,
+        "pvpUnitarioCents": 150,
+        "pvpUnitarioNeto": 1.36364,
+        "ivaBp": 1000,
+        "codimpuesto": "IVA10",
+        "estado": "anulada",
+        "destino": "barra",
+        "camarero": "Luis",
+        "creadaEn": "2026-10-09T21:41:00.000",
+        "anuladaEn": "2026-10-09T21:45:12.000",
+        "motivoAnulacion": "Error al pedir"
+      }
+    ],
+    "camarero": "Ana",
+    "comensales": 4,
+    "cuentaSolicitada": true,
+    "observaciones": "Alérgico a frutos secos"
+  },
+  "ticket": {
+    "id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+    "numeroLocal": 12,
+    "mesaId": "mesa-7",
+    "nombreMesa": "Mesa 7",
+    "comandaId": "c-7f3a",
+    "fechaHora": "2026-10-09T22:31:05.000",
+    "lineas": [
+      {
+        "id": "l1",
+        "referencia": "CROQ",
+        "descripcion": "Croquetas de jamón",
+        "cantidad": 2.0,
+        "pvpUnitarioCents": 450,
+        "pvpUnitarioNeto": 4.09091,
+        "ivaBp": 1000,
+        "codimpuesto": "IVA10",
+        "estado": "enviada",
+        "destino": "cocina",
+        "camarero": "Ana",
+        "creadaEn": "2026-10-09T21:13:58.000"
+      },
+      {
+        "id": "l2",
+        "referencia": "CANA",
+        "descripcion": "Caña",
+        "cantidad": 4.0,
+        "pvpUnitarioCents": 200,
+        "pvpUnitarioNeto": 1.81818,
+        "ivaBp": 1000,
+        "codimpuesto": "IVA10",
+        "nota": "sin espuma\n\"doble\"",
+        "estado": "servida",
+        "destino": "barra",
+        "camarero": "Ana",
+        "creadaEn": "2026-10-09T21:14:02.000"
+      },
+      {
+        "id": "l3",
+        "referencia": "GINT",
+        "descripcion": "Gin-tonic",
+        "cantidad": 1.0,
+        "pvpUnitarioCents": 900,
+        "pvpUnitarioNeto": 7.43802,
+        "ivaBp": 2100,
+        "estado": "enviada",
+        "destino": "barra",
+        "creadaEn": "2026-10-09T21:40:30.000"
+      }
+    ],
+    "totales": {
+      "netoCents": 2289,
+      "ivaCents": 311,
+      "totalCents": 2600,
+      "desglose": [
+        {
+          "codimpuesto": "IVA10",
+          "ivaBp": 1000,
+          "baseCents": 1545,
+          "cuotaCents": 155
+        },
+        {
+          "ivaBp": 2100,
+          "baseCents": 744,
+          "cuotaCents": 156
+        }
+      ]
+    },
+    "metodoPago": "tarjeta",
+    "pagos": [
+      {
+        "metodo": "efectivo",
+        "importeCents": 1000
+      },
+      {
+        "metodo": "tarjeta",
+        "importeCents": 1600
+      }
+    ],
+    "entregadoCents": 2000,
+    "camarero": "Ana",
+    "comensales": 4,
+    "factura": {
+      "estado": "sincronizado",
+      "idfactura": 812,
+      "codigo": "F2026S12",
+      "numero": 12,
+      "idasiento": 1001,
+      "pagada": true,
+      "emitida": true,
+      "avisos": [
+        "Total FS 26,01 € ≠ TPV 26,00 €"
+      ],
+      "actualizadoEn": "2026-10-09T22:33:05.000"
+    }
+  }
+}

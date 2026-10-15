@@ -6,87 +6,183 @@ import '../../../core/isolates/cierre_z/cierre_z_models.dart'
     show CierreZResult;
 import '../../../core/isolates/escpos/ticket_documents.dart';
 import '../../../core/isolates/isolate_runner.dart';
-import '../../../core/logging/app_logger.dart';
 import '../../../core/money/money.dart';
 import '../../../core/network/printing/raw_printer_transport.dart'
     show PrinterEndpoint;
+import '../../impresion/domain/formato_impresion.dart';
 import '../../sala/domain/comanda.dart';
 import '../../sala/domain/linea_comanda.dart';
+import '../../sala/domain/marcha_pase.dart';
 import '../../sala/domain/mesa.dart';
+import '../../sala/domain/precuenta_emitida.dart';
 import '../../sala/domain/ticket.dart';
+import '../domain/empresa_emisora.dart';
 import '../domain/host_settings.dart';
 import 'alert_bus.dart';
+import 'host_state_store.dart';
+import 'impresion/canal_impresion.dart';
+import 'impresion/comandas_impresion.dart';
+import 'impresion/mapeo_documentos.dart';
+import 'impresion/mapeo_documentos.dart'
+    as mapeo
+    show formaDePago, tituloPuesto;
+import 'impresion/muestras.dart';
+import 'impresion/tickets_impresion.dart';
 import 'ports.dart';
 import 'sala_effects.dart';
 
-/// Impresión ESC/POS del host: comandas de cocina/barra, tickets e informe Z.
+export 'impresion/mapeo_documentos.dart'
+    show AlcanceReimpresion, MotivoReimpresion;
+export 'impresion/muestras.dart' show DocumentoMuestra;
+
+/// Fachada de la impresión ESC/POS del host (§5.0 del diseño de impresión):
+/// el único [SalaEffects] de impresión y la API que usa la interfaz.
 ///
-/// Los bytes se generan en un isolate y se entregan a [PrinterPort] (la cola
-/// de impresión, que serializa y reintenta). Un fallo de impresión nunca
-/// se propaga al llamador: se convierte en aviso operativo.
+/// No genera documentos: delega en sus colaboradores de `impresion/`, que
+/// crea en el constructor y no expone:
 ///
-/// Como [SalaEffects], imprime la comanda de cocina al aceptar líneas y el
-/// ticket al cobrar (si `imprimirTicketAlCobrar`).
+/// - [CanalImpresion]: genera en un isolate con el perfil de cada impresora,
+///   añade copias y aviso, encola en [PrinterPort] y sigue el trabajo;
+/// - [ComandasImpresion]: comanda de cada envío, MARCHAR, anulación y
+///   reimpresión de comanda (un ticket por puesto);
+/// - [TicketsImpresion]: provisional y cajón al cobrar, factura ORIGINAL o
+///   DUPLICADO, copia del provisional, vista previa, precuenta, espera de la
+///   factura y emisiones pendientes.
+///
+/// Las impresiones automáticas (efectos) nunca propagan un fallo: lo
+/// convierten en aviso operativo. Las que pide la interfaz lo relanzan, para
+/// que quien pulsó sepa que no ha salido.
+///
+/// Los ajustes, la empresa y el nombre del TPV se leen en cada impresión, así
+/// que [configurar] en caliente vale para lo siguiente que se imprima.
 final class PrintingService extends SalaEffects {
+  /// [store] es el diario del host: de él se leen los tickets y en él se
+  /// escribe su estado de impresión.
+  ///
+  /// [empresa] es la cabecera fija de los ajustes (solo tests) y
+  /// [empresaErp], la identidad del emisor guardada en el diario (§5.13).
   PrintingService({
     required this._alerts,
-    required this._runner,
+    required IsolateRunner runner,
     required ImpresionSettings settings,
     required String nombreTpv,
+    required HostStateStore store,
     PrinterPort? printer,
     EmpresaTicket? empresa,
+    EmpresaEmisora? empresaErp,
     DateTime Function()? now,
   }) : _now = now ?? DateTime.now {
     configurar(
       printer: printer,
       settings: settings,
       empresa: empresa,
+      empresaErp: empresaErp,
       nombreTpv: nombreTpv,
+    );
+    _canal = CanalImpresion(
+      alerts: _alerts,
+      runner: runner,
+      settings: () => _settings,
+      printer: () => _printer,
+    );
+    _comandas = ComandasImpresion(
+      canal: _canal,
+      alerts: _alerts,
+      settings: () => _settings,
+      now: _now,
+    );
+    _tickets = TicketsImpresion(
+      store: store,
+      canal: _canal,
+      alerts: _alerts,
+      settings: () => _settings,
+      cabecera: () => _cabecera,
+      now: _now,
     );
   }
 
-  static final Logger _log = appLogger('host.impresion');
-
   final AlertBus _alerts;
-  final IsolateRunner _runner;
   final DateTime Function() _now;
+  late final CanalImpresion _canal;
+  late final ComandasImpresion _comandas;
+  late final TicketsImpresion _tickets;
   ImpresionSettings _settings = const ImpresionSettings();
   String _nombreTpv = '';
   PrinterPort? _printer;
   EmpresaTicket? _empresa;
-  final Set<Future<void>> _inFlight = {};
+  EmpresaEmisora? _empresaErp;
 
   ImpresionSettings get settings => _settings;
 
-  /// Hay transporte y al menos una impresora configurada.
+  /// Hay cola de impresión y al menos una impresora configurada.
   bool get disponible => _printer != null && _settings.hayImpresora;
 
+  /// Hay cola de impresión y una impresora por la que salen los documentos de
+  /// cliente (la de tickets o, si no, la de cocina o la de barra).
+  bool get hayImpresoraTickets =>
+      _printer != null && _settings.paraTickets != null;
+
+  /// La cabecera del emisor tiene NIF: sin él no se imprimen facturas
+  /// simplificadas. No avisa de cambios; la interfaz usa
+  /// `cabeceraFiscalCompletaProvider`, que compone la misma cabecera.
+  bool get cabeceraFiscalCompleta =>
+      _cabecera.cifnif?.trim().isNotEmpty ?? false;
+
+  /// Cambia en caliente lo que se indique; lo nulo se conserva.
   void configurar({
     PrinterPort? printer,
     ImpresionSettings? settings,
     EmpresaTicket? empresa,
+    EmpresaEmisora? empresaErp,
     String? nombreTpv,
   }) {
     _printer = printer ?? _printer;
     if (settings != null) _settings = settings;
     if (empresa != null) _empresa = empresa;
+    if (empresaErp != null) _empresaErp = empresaErp;
     if (nombreTpv != null) _nombreTpv = nombreTpv;
   }
 
-  /// Completa cuando no queda ninguna impresión en curso (tests y cierre).
-  Future<void> idle() async {
-    while (_inFlight.isNotEmpty) {
-      await Future.wait(_inFlight.toList());
+  /// Completa cuando no queda ningún trabajo en seguimiento (tests y cierre).
+  Future<void> idle() => _canal.idle();
+
+  /// Reintenta el trabajo de impresión fallido [jobId], el de
+  /// `OperationalAlert.trabajoImpresion` (§5.17). Una factura que pudo
+  /// enviar bytes no se repite: sale el siguiente DUPLICADO; si no llegó a
+  /// conectar, o si no es una factura, se reencolan sus mismos bytes y un
+  /// nuevo fallo da otro aviso. Lanza [PrinterException] si no está fallido
+  /// o ya se reintentó, si la cola lo rechaza y, con el DUPLICADO, lo mismo
+  /// que [imprimirFactura]. El canal nunca reenvía los bytes de una factura
+  /// que pudo salir, aunque este servicio ya no la recuerde.
+  Future<void> reintentar(String jobId) async {
+    if (_tickets.esTrabajoDeFactura(jobId)) {
+      await _tickets.reintentarFactura(jobId);
+    } else {
+      _canal.reintentar(jobId);
     }
   }
 
-  EmpresaTicket get _cabecera => _empresa ?? EmpresaTicket(nombre: _nombreTpv);
+  /// [reintentar] haría algo ahora mismo con [jobId] (la interfaz solo
+  /// ofrece «Reintentar» entonces): no ha salido ya, no se reintentó ni lo
+  /// sustituyó un DUPLICADO, no se canceló y no tiene un reintento en curso.
+  bool puedeReintentar(String jobId) => _tickets.esTrabajoDeFactura(jobId)
+      ? _tickets.puedeReintentarFactura(jobId)
+      : _canal.puedeReintentar(jobId);
+
+  /// Cabecera del emisor con los ajustes y la empresa vigentes (§5.13).
+  EmpresaTicket get _cabecera => componerCabecera(
+    empresaAjustes: _empresa,
+    empresaErp: _empresaErp,
+    formato: _settings.formato.ticket,
+    nombreTpv: _nombreTpv,
+  );
 
   /// Texto impreso de cada forma de cobro.
-  static String formaDePago(MetodoPago metodo) => switch (metodo) {
-    MetodoPago.efectivo => 'Efectivo',
-    MetodoPago.tarjeta => 'Tarjeta',
-  };
+  static String formaDePago(MetodoPago metodo) => mapeo.formaDePago(metodo);
+
+  /// Título del puesto en los tickets de comanda.
+  static String tituloPuesto(DestinoPreparacion destino) =>
+      mapeo.tituloPuesto(destino);
 
   // ---------------------------------------------------------------------------
   // Efectos de la sala
@@ -96,371 +192,213 @@ final class PrintingService extends SalaEffects {
     Mesa mesa,
     Comanda comanda,
     List<LineaComanda> nuevas,
-  ) => imprimirComanda(mesa, comanda, nuevas, _now());
+  ) => _comandas.imprimirEnvio(mesa, comanda, nuevas);
 
   @override
   Future<void> onLineasAnuladas(
     Mesa mesa,
     Comanda comanda,
     List<LineaComanda> anuladas,
-  ) => imprimirAnulacion(mesa, comanda, anuladas, _now());
+  ) => _comandas.imprimirAnulacion(mesa, comanda, anuladas);
 
   @override
+  Future<void> onPaseMarchado(
+    Mesa mesa,
+    Comanda comanda,
+    MarchaPase marcha,
+    List<LineaComanda> lineas,
+  ) => _comandas.imprimirMarcha(mesa, comanda, marcha, lineas);
+
+  /// Sin cola de impresión no hace nada, como siempre: en el modo «Emitir
+  /// factura al cobrar» esperaría la factura para nada.
+  @override
   Future<void> onMesaCobrada(Ticket ticket) async {
-    if (_settings.imprimirTicketAlCobrar) await imprimirTicket(ticket);
+    if (_printer == null) return;
+    await _tickets.alCobrar(ticket);
   }
 
   // ---------------------------------------------------------------------------
-  // Documentos
+  // Documentos de cliente (acciones de la interfaz)
 
-  /// Imprime las líneas nuevas divididas por destino de preparación: un
-  /// ticket por puesto (cocina / barra) con solo sus líneas.
-  ///
-  /// Si un puesto no tiene impresora propia, su ticket sale por la del otro
-  /// (ninguna línea se pierde), pero **sigue siendo un ticket aparte** con
-  /// el título de su puesto y una indicación para llevarlo allí. Se prefiere
-  /// a un único ticket con dos secciones porque en la cocina el ticket es la
-  /// unidad de trabajo: se corta, se cuelga en el pase o se entrega al
-  /// camarero de barra tal cual, sin que nadie tenga que separar a mano qué
-  /// parte es de quién. La cola de impresión serializa los trabajos de una
-  /// misma impresora, así que salen seguidos.
-  Future<void> imprimirComanda(
-    Mesa mesa,
-    Comanda comanda,
-    List<LineaComanda> nuevas,
-    DateTime cuando,
-  ) => _imprimirPorDestino(mesa, comanda, nuevas, cuando, anulacion: false);
+  /// Imprime la factura simplificada del ticket: ORIGINAL la primera vez y
+  /// DUPLICADO nº n las siguientes (§5.5). Lanza [ValidationException] si el
+  /// ticket no está en el turno o su factura no se puede imprimir
+  /// (`motivoNoImprimible`, QR no válido) y [PrinterException] si no hay
+  /// impresora de tickets o no se pudo generar o encolar.
+  Future<void> imprimirFactura(String ticketId) =>
+      _tickets.imprimirFactura(ticketId);
 
-  /// Imprime el aviso de anulación de [anuladas] en el puesto que las
-  /// prepara: un ticket "ANULACIÓN COCINA/BARRA" con las líneas marcadas
-  /// como anuladas, para que el puesto deje de prepararlas.
-  Future<void> imprimirAnulacion(
-    Mesa mesa,
-    Comanda comanda,
-    List<LineaComanda> anuladas,
-    DateTime cuando,
-  ) => _imprimirPorDestino(mesa, comanda, anuladas, cuando, anulacion: true);
+  /// Reimprime el documento provisional con la marca «COPIA», sin cajón.
+  Future<void> reimprimirProvisional(String ticketId) =>
+      _tickets.reimprimirProvisional(ticketId);
 
-  Future<void> _imprimirPorDestino(
+  /// La factura si se puede imprimir y, si no, una copia del provisional.
+  Future<void> imprimirDocumentoTicket(String ticketId) =>
+      _tickets.imprimirDocumentoTicket(ticketId);
+
+  /// Bytes del documento que saldría ahora mismo, sin efectos.
+  Future<Uint8List> vistaPreviaTicket(String ticketId) =>
+      _tickets.vistaPreviaTicket(ticketId);
+
+  /// Imprime una precuenta ya registrada (`SalaService.emitirPrecuenta`).
+  /// Lanza [PrinterException] si no hay impresora de tickets o no se pudo
+  /// generar o encolar.
+  Future<void> imprimirPrecuenta(PrecuentaEmitida precuenta, {String? zona}) =>
+      _tickets.imprimirPrecuenta(precuenta, zona: zona);
+
+  /// Abre el cajón a mano. Lanza [PrinterException] si no hay impresora de
+  /// tickets o no se pudo encolar.
+  Future<void> abrirCajon() => _tickets.abrirCajon();
+
+  /// El ticket tiene una emisión automática de factura en curso (§5.4).
+  bool emisionPendiente(String ticketId) => _tickets.emisionPendiente(ticketId);
+
+  /// Tickets con una emisión automática en curso: primero el conjunto actual
+  /// y después uno nuevo al empezar y al terminar cada emisión.
+  Stream<Set<String>> get emisionesPendientes => _tickets.emisionesPendientes;
+
+  /// Libera las esperas de factura en curso y las futuras (al cerrar el TPV).
+  void cancelarEsperas() => _tickets.cancelarEsperas();
+
+  // ---------------------------------------------------------------------------
+  // Comandas y muestras (acciones de la interfaz)
+
+  /// Reimprime la comanda de la mesa con la banda del [motivo] en los
+  /// [destinos] elegidos (§5.10). Lanza [ValidationException] si no hay nada
+  /// que reimprimir y [PrinterException] si ninguno de esos puestos tiene
+  /// impresora o no se pudo generar o encolar.
+  Future<void> reimprimirComanda(
     Mesa mesa,
-    Comanda comanda,
-    List<LineaComanda> lineas,
-    DateTime cuando, {
-    required bool anulacion,
+    Comanda comanda, {
+    required Set<DestinoPreparacion> destinos,
+    required AlcanceReimpresion alcance,
+    required MotivoReimpresion motivo,
+    required String dispositivo,
+  }) => _comandas.reimprimirComanda(
+    mesa,
+    comanda,
+    destinos: destinos,
+    alcance: alcance,
+    motivo: motivo,
+    dispositivo: dispositivo,
+  );
+
+  /// Imprime la muestra [tipo] en la impresora que sirve a [rol] según
+  /// [ajustes] (el borrador de la página «Tickets y comandas»), con el perfil
+  /// y la cabecera de ese borrador (§5.18). Lanza [PrinterException] si ese
+  /// rol no tiene impresora o no se pudo generar o encolar.
+  Future<void> imprimirMuestra(
+    DocumentoMuestra tipo, {
+    required ImpresionSettings ajustes,
+    required RolImpresora rol,
   }) async {
-    if (!_settings.imprimirComandas || !disponible || lineas.isEmpty) return;
-    final porDestino = <DestinoPreparacion, List<LineaComanda>>{
-      for (final destino in DestinoPreparacion.values) destino: [],
-    };
-    for (final linea in lineas) {
-      porDestino[linea.destino]!.add(linea);
-    }
-    for (final MapEntry(key: destino, value: delDestino)
-        in porDestino.entries) {
-      if (delDestino.isEmpty) continue;
-      final impresora = _settings.impresoraDe(destino);
-      if (impresora == null) continue;
-      final puesto = tituloPuesto(destino);
-      // Cada puesto se aísla: un fallo no tipado (isolate que no arranca,
-      // error de programación del builder...) al generar o encolar el
-      // ticket de un puesto no debe impedir que salgan los de los demás.
-      try {
-        final data = KitchenOrderPrintData(
-          titulo: anulacion ? 'ANULACIÓN $puesto' : puesto,
-          mesa: mesa.nombre,
-          camarero: comanda.camarero,
-          fechaHora: cuando,
-          numeroComanda: comanda.id.length > 8
-              ? comanda.id.substring(0, 8)
-              : comanda.id,
-          lineas: [
-            for (final l in delDestino)
-              LineaComandaPrint(
-                cantidad: l.cantidad,
-                descripcion: l.descripcion,
-                nota: anulacion ? _notaAnulacion(l) : l.nota,
-                anulada: anulacion,
-              ),
-          ],
-          observaciones: _observaciones(
-            destino,
-            respaldo: impresora.respaldo,
-            anulacion: anulacion,
-            deLaComanda: comanda.observaciones,
-          ),
-          paper: _settings.paper,
-        );
-        await _enviar(
-          impresora.endpoint,
-          '${anulacion ? 'Anulación' : 'Comanda'} ${mesa.nombre} · '
-          '${destino.name}',
-          () => generarComandaCocinaEnIsolate(data, runner: _runner),
-        );
-      } on Object catch (error, stackTrace) {
-        final documento = anulacion ? 'la anulación' : 'la comanda';
-        _log.warning(
-          'Fallo inesperado al imprimir $documento de ${destino.name} '
-          'de ${mesa.nombre}',
-          error,
-          stackTrace,
-        );
-        _alerts.error(
-          'No se pudo imprimir $documento de ${puesto.toLowerCase()} '
-          'de ${mesa.nombre}',
-          detalle: error.toString(),
-          origen: 'impresion',
-        );
-      }
-    }
-  }
-
-  /// Título del puesto en los tickets de comanda.
-  static String tituloPuesto(DestinoPreparacion destino) => switch (destino) {
-    DestinoPreparacion.cocina => 'COCINA',
-    DestinoPreparacion.barra => 'BARRA',
-  };
-
-  static String? _notaAnulacion(LineaComanda linea) {
-    final motivo = switch (linea.motivoAnulacion?.trim()) {
-      null || '' => null,
-      'vaciar' => 'mesa vaciada',
-      final String texto => texto,
-    };
-    return motivo == null ? linea.nota : 'Motivo: $motivo';
-  }
-
-  static String? _observaciones(
-    DestinoPreparacion destino, {
-    required bool respaldo,
-    required bool anulacion,
-    String? deLaComanda,
-  }) {
-    final puesto = tituloPuesto(destino).toLowerCase();
-    final partes = [
-      if (respaldo) 'Sin impresora de $puesto: llevar a $puesto',
-      if (!anulacion && deLaComanda != null && deLaComanda.trim().isNotEmpty)
-        deLaComanda.trim(),
-    ];
-    return partes.isEmpty ? null : partes.join(' · ');
-  }
-
-  /// Imprime el ticket (factura simplificada si ya tiene código de FS).
-  Future<void> imprimirTicket(Ticket ticket, {bool reimpresion = false}) async {
-    final endpoint = _settings.paraTickets;
-    if (_printer == null || endpoint == null) {
-      if (reimpresion) {
-        throw const PrinterException('No hay impresora de tickets configurada');
-      }
-      return;
-    }
-    final factura = ticket.factura;
-    final codigo = factura?.codigo;
-    final data = TicketPrintData(
-      empresa: _cabecera,
-      tituloDocumento: codigo != null ? 'FACTURA SIMPLIFICADA' : 'TICKET',
-      codigoFactura: codigo,
-      numero2: ticket.claveFactura,
-      fechaHora: ticket.fechaHora,
-      mesa: ticket.nombreMesa,
-      camarero: ticket.camarero,
-      lineas: [
-        for (final l in ticket.lineas)
-          LineaTicket(
-            descripcion: l.descripcion,
-            cantidad: l.cantidad,
-            pvpUnitarioCents: l.pvpUnitarioCents,
-            importeCents: l.importeCents,
-            nota: l.nota,
-          ),
-      ],
-      desglose: [
-        for (final d in ticket.totales.desglose)
-          DesgloseIvaTicketPrint(
-            ivaPct: basisPointsToPercent(d.ivaBp),
-            baseCents: d.baseCents,
-            cuotaCents: d.cuotaCents,
-          ),
-      ],
-      totalCents: ticket.totalCents,
-      metodoPago: ticket.esMixto ? 'Mixto' : formaDePago(ticket.metodoPago),
-      // Pago único: sin desglose (el ticket sale exactamente como siempre).
-      pagos: [
-        if (ticket.esMixto)
-          for (final pago in ticket.pagos)
-            PagoTicketPrint(
-              formaPago: formaDePago(pago.metodo),
-              importeCents: pago.importeCents,
-            ),
-      ],
-      entregadoCents: ticket.entregadoCents,
-      cambioCents: ticket.entregadoCents == null ? null : ticket.cambioCents,
-      avisos: [
-        if (reimpresion) 'COPIA',
-        if (factura?.estado == EstadoSincronizacion.error)
-          'Factura pendiente de revisión',
-      ],
-      paper: _settings.paper,
-      // El cajón se abre si parte del cobro (o todo) entra en caja.
-      abrirCajon:
-          !reimpresion &&
-          _settings.abrirCajonEfectivo &&
-          ticket.pagos.any((pago) => pago.metodo == MetodoPago.efectivo),
-    );
-    await _enviar(
-      endpoint,
-      'Ticket ${ticket.numeroLocal}${reimpresion ? ' (copia)' : ''}',
-      () => generarTicketEnIsolate(data, runner: _runner),
-    );
-  }
-
-  /// Imprime la precuenta de una mesa (cuenta provisional sin validez fiscal:
-  /// sin número, sin forma de pago y sin abrir el cajón). Lanza
-  /// [PrinterException] si no hay impresora de tickets, porque la pide el
-  /// usuario y debe saber que no ha salido.
-  Future<void> imprimirPrecuenta(
-    Mesa mesa,
-    Comanda comanda,
-    TotalesTicket totales, {
-    DateTime? cuando,
-  }) async {
-    final endpoint = _settings.paraTickets;
-    if (_printer == null || endpoint == null) {
-      throw const PrinterException('No hay impresora de tickets configurada');
-    }
-    final activas = comanda.lineasActivas.toList();
-    if (activas.isEmpty) {
-      throw const ValidationException(
-        'La mesa no tiene líneas: no hay precuenta que imprimir',
+    final endpoint = _impresoraDeRol(ajustes, rol);
+    if (endpoint == null) {
+      throw PrinterException(
+        'No hay impresora de ${rol.name} configurada: no se puede imprimir '
+        'la muestra',
       );
     }
-    final data = PrecuentaPrintData(
-      empresa: _cabecera,
-      fechaHora: cuando ?? _now(),
-      mesa: mesa.nombre,
-      camarero: comanda.camarero,
-      comensales: comanda.comensales,
-      lineas: [
-        for (final l in activas)
-          LineaTicket(
-            descripcion: l.descripcion,
-            cantidad: l.cantidad,
-            pvpUnitarioCents: l.pvpUnitarioCents,
-            importeCents: l.importeCents,
-            nota: l.nota,
-          ),
-      ],
-      desglose: [
-        for (final d in totales.desglose)
-          DesgloseIvaTicketPrint(
-            ivaPct: basisPointsToPercent(d.ivaBp),
-            baseCents: d.baseCents,
-            cuotaCents: d.cuotaCents,
-          ),
-      ],
-      totalCents: totales.totalCents,
-      paper: _settings.paper,
+    final cabecera = componerCabecera(
+      empresaAjustes: _empresa,
+      empresaErp: _empresaErp,
+      formato: ajustes.formato.ticket,
+      nombreTpv: _nombreTpv,
     );
-    await _enviar(
+    final perfil = ajustes.perfilPara(endpoint);
+    await _canal.enviar(
       endpoint,
-      'Precuenta ${mesa.nombre}',
-      () => generarPrecuentaEnIsolate(data, runner: _runner),
+      'Muestra · ${tipo.etiqueta}',
+      (p) => generarMuestra(
+        tipo,
+        ajustes: ajustes,
+        cabecera: cabecera,
+        papel: p.papel,
+        ahora: _now(),
+        runner: _canal.runner,
+        avanceInicial: p.lineasIniciales,
+      ),
+      preparacion: tipo.preparacion,
+      lanzarErrores: true,
+      perfil: perfil,
     );
   }
 
-  /// Imprime el informe del Cierre Z.
-  Future<void> imprimirInformeZ(CierreZResult result) async {
+  static PrinterEndpoint? _impresoraDeRol(
+    ImpresionSettings ajustes,
+    RolImpresora rol,
+  ) => switch (rol) {
+    RolImpresora.tickets => ajustes.paraTickets,
+    RolImpresora.cocina =>
+      ajustes.impresoraDe(DestinoPreparacion.cocina)?.endpoint,
+    RolImpresora.barra =>
+      ajustes.impresoraDe(DestinoPreparacion.barra)?.endpoint,
+  };
+
+  // ---------------------------------------------------------------------------
+  // Informe Z
+
+  /// Imprime el informe del Cierre Z con la sección «PRECUENTAS SIN COBRO»
+  /// si hay alguna (§5.15). Sin impresora de tickets no hace nada; un fallo
+  /// se convierte en aviso.
+  Future<void> imprimirInformeZ(
+    CierreZResult result, {
+    List<PrecuentaSinCobro> precuentasSinCobro = const [],
+  }) async {
     final endpoint = _settings.paraTickets;
     if (_printer == null || endpoint == null) return;
     final informe = result.informe;
-    final data = ZReportPrintData(
-      empresa: _cabecera,
-      nombreTpv: _nombreTpv,
-      fecha: informe.fecha,
-      numTickets: informe.numTickets,
-      numAnulados: informe.numAnulados,
-      ventasTotalCents: informe.ventasTotalCents,
-      ventasEfectivoCents: informe.ventasEfectivoCents,
-      ventasTarjetaCents: informe.ventasTarjetaCents,
-      ticketMedioCents: informe.ticketMedioCents,
-      porIva: [
-        for (final v in informe.porIva)
-          DesgloseIvaTicketPrint(
-            ivaPct: basisPointsToPercent(v.ivaBp),
-            baseCents: v.baseCents,
-            cuotaCents: v.cuotaCents,
-          ),
-      ],
-      fondoCajaCents: informe.fondoCajaCents,
-      retiradasCents: informe.retiradasCents,
-      efectivoEsperadoCents: informe.efectivoEsperadoCents,
-      efectivoContadoCents: informe.efectivoContadoCents,
-      descuadreCents: informe.descuadreCents,
-      partidas: [
-        for (final p in result.asiento.partidas)
-          (
-            codsubcuenta: p.codsubcuenta,
-            concepto: p.concepto,
-            debeCents: p.debeCents,
-            haberCents: p.haberCents,
-          ),
-      ],
-      paper: _settings.paper,
-    );
-    await _enviar(
+    final cabecera = _cabecera;
+    await _canal.enviar(
       endpoint,
       'Informe Z ${informe.idCierre}',
-      () => generarInformeZEnIsolate(data, runner: _runner),
+      (perfil) => generarInformeZEnIsolate(
+        ZReportPrintData(
+          empresa: cabecera,
+          nombreTpv: _nombreTpv,
+          fecha: informe.fecha,
+          numTickets: informe.numTickets,
+          numAnulados: informe.numAnulados,
+          ventasTotalCents: informe.ventasTotalCents,
+          ventasEfectivoCents: informe.ventasEfectivoCents,
+          ventasTarjetaCents: informe.ventasTarjetaCents,
+          ticketMedioCents: informe.ticketMedioCents,
+          porIva: [
+            for (final v in informe.porIva)
+              DesgloseIvaTicketPrint(
+                ivaPct: basisPointsToPercent(v.ivaBp),
+                baseCents: v.baseCents,
+                cuotaCents: v.cuotaCents,
+              ),
+          ],
+          fondoCajaCents: informe.fondoCajaCents,
+          retiradasCents: informe.retiradasCents,
+          efectivoEsperadoCents: informe.efectivoEsperadoCents,
+          efectivoContadoCents: informe.efectivoContadoCents,
+          descuadreCents: informe.descuadreCents,
+          partidas: [
+            for (final p in result.asiento.partidas)
+              (
+                codsubcuenta: p.codsubcuenta,
+                concepto: p.concepto,
+                debeCents: p.debeCents,
+                haberCents: p.haberCents,
+              ),
+          ],
+          precuentasSinCobro: [
+            for (final p in precuentasSinCobro)
+              (
+                numero: p.precuenta.numero,
+                mesa: p.precuenta.nombreMesa,
+                emitidaEn: p.precuenta.emitidaEn,
+                totalCents: p.precuenta.totalCents,
+                motivo: p.motivo,
+              ),
+          ],
+          paper: perfil.papel,
+        ),
+        runner: _canal.runner,
+      ),
     );
-  }
-
-  // ---------------------------------------------------------------------------
-
-  Future<void> _enviar(
-    PrinterEndpoint endpoint,
-    String description,
-    Future<Uint8List> Function() generar,
-  ) async {
-    final printer = _printer;
-    if (printer == null) return;
-    final Uint8List bytes;
-    try {
-      bytes = await generar();
-    } on AppException catch (error) {
-      _alerts.error(
-        'No se pudo generar "$description"',
-        detalle: error.message,
-        origen: 'impresion',
-      );
-      return;
-    }
-    final String jobId;
-    try {
-      jobId = printer.imprimir(endpoint, bytes, description: description);
-    } on AppException catch (error) {
-      _alerts.error(
-        'No se pudo encolar "$description"',
-        detalle: error.message,
-        origen: 'impresion',
-      );
-      return;
-    }
-    _log.fine('Encolado "$description" → $endpoint ($jobId)');
-    late final Future<void> seguimiento;
-    seguimiento = printer
-        .terminado(jobId)
-        .then((error) {
-          if (error != null) {
-            _alerts.error(
-              'Fallo de impresión: $description',
-              detalle: '$endpoint: $error',
-              origen: 'impresion',
-            );
-          }
-        })
-        .catchError((Object error) {
-          _log.warning('Seguimiento de "$description" falló', error);
-        })
-        .whenComplete(() => _inFlight.remove(seguimiento));
-    _inFlight.add(seguimiento);
   }
 }

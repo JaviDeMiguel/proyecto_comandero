@@ -67,6 +67,8 @@ class _HostShellState extends ConsumerState<HostShell> {
           mesasOcupadas: _mesasOcupadas,
           onAbrirEnrutamiento: (contexto) =>
               unawaited(abrirEnrutamiento(contexto)),
+          onAbrirTicketsYComandas: (contexto) =>
+              unawaited(abrirTicketsYComandas(contexto)),
         ),
       ),
     );

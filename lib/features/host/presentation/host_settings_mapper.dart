@@ -23,7 +23,8 @@ const int kIdEmpresaPorDefecto = 1;
 ///   la facturación y el stock quedan "no configurados" hasta completarlo),
 ///   empresa (1 por defecto) y emisión de facturas.
 /// * Cierre: modo del asiento Z y subcuentas forzadas.
-/// * Impresión (con el enrutamiento de comandas por familias), reposición y
+/// * Impresión (con el enrutamiento de comandas por familias y el formato:
+///   perfiles por impresora, ticket, emisión, QR y pases), reposición y
 ///   mesas.
 ///
 /// El fondo de caja (`fondoCajaCents`) no forma parte de [HostSettings]: lo
@@ -61,6 +62,7 @@ HostSettings hostSettingsFromApp(app.AppSettings s) {
       abrirCajonEfectivo: s.impresion.abrirCajon,
       paper: s.impresion.paper,
       enrutamiento: s.impresion.enrutamiento,
+      formato: s.impresion.formato,
     ),
     reposicion: ReposicionSettings(
       automatica: s.reposicion.automatica,

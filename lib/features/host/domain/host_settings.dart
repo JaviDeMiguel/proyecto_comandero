@@ -16,9 +16,11 @@ import '../../../core/isolates/escpos/escpos_builder.dart' show PaperWidth;
 import '../../../core/isolates/escpos/ticket_documents.dart' show EmpresaTicket;
 import '../../../core/isolates/reposicion/reposicion_models.dart';
 import '../../../core/network/printing/raw_printer_transport.dart';
+import '../../impresion/domain/formato_impresion.dart';
 import '../../sala/domain/enrutamiento_comandas.dart';
 import '../../sala/domain/linea_comanda.dart' show DestinoPreparacion;
 import '../../sala/domain/mesa.dart';
+import '../../sala/domain/pases.dart';
 
 /// Datos fiscales y de facturación que viajan en cada factura.
 final class FiscalSettings extends Equatable {
@@ -98,6 +100,7 @@ final class ImpresionSettings extends Equatable {
     this.abrirCajonEfectivo = false,
     this.paper = PaperWidth.mm80,
     this.enrutamiento = const EnrutamientoComandas(),
+    this.formato = const FormatoImpresion(),
   });
 
   final PrinterEndpoint? cocina;
@@ -110,12 +113,35 @@ final class ImpresionSettings extends Equatable {
   final bool imprimirComandas;
   final bool imprimirTicketAlCobrar;
   final bool abrirCajonEfectivo;
+
+  /// Papel heredado: el de las impresoras sin perfil en [formato].
   final PaperWidth paper;
 
   /// Familia → cocina/barra. El host lo aplica a cada línea que acepta.
   final EnrutamientoComandas enrutamiento;
 
+  /// Perfiles por impresora, formato del ticket, emisión, QR VeriFactu y
+  /// pases.
+  final FormatoImpresion formato;
+
   bool get hayImpresora => cocina != null || barra != null || tickets != null;
+
+  /// Perfil de la impresora física [endpoint]: delega en [resolverPerfil]
+  /// con las tres direcciones configuradas (tickets, cocina, barra), el
+  /// formato y el papel heredado. Así la barra impresa por la impresora de
+  /// cocina usa el perfil de cocina.
+  PerfilImpresora perfilPara(PrinterEndpoint endpoint) => resolverPerfil(
+    endpoint,
+    direcciones: {
+      RolImpresora.tickets: tickets,
+      RolImpresora.cocina: cocina,
+      RolImpresora.barra: barra,
+    },
+    formato: formato,
+    papelHeredado: paper,
+  );
+
+  PasesConfig get pases => formato.pases;
 
   /// Impresora efectiva de un destino de preparación (`cocina` | `barra`).
   PrinterEndpoint? paraDestino(String destino) =>
@@ -148,6 +174,7 @@ final class ImpresionSettings extends Equatable {
     abrirCajonEfectivo,
     paper,
     enrutamiento,
+    formato,
   ];
 }
 

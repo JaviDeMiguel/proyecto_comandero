@@ -15,6 +15,7 @@ import 'package:proyecto_comandero/features/host/domain/sync_job.dart';
 import 'package:proyecto_comandero/features/sala/domain/ticket.dart';
 import 'package:test/test.dart';
 
+import '../../core/isolates/escpos/escpos_decoder.dart';
 import 'fakes/fake_ports.dart';
 import 'support/host_test_support.dart';
 
@@ -71,6 +72,7 @@ void main() {
         imprimirTicketAlCobrar: false,
       ),
       nombreTpv: 'Barra',
+      store: f.store,
       printer: printer,
       now: f.clock.call,
     );
@@ -114,6 +116,11 @@ void main() {
     await printing.idle();
     await Future<void>.delayed(Duration.zero);
   }
+
+  /// Líneas de texto del último informe Z impreso.
+  List<String> informeZImpreso() => decodeEscPos(
+    printer.jobs.lastWhere((j) => j.description.startsWith('Informe Z')).bytes,
+  ).texts;
 
   /// Marca como sincronizadas las facturas de los tickets del turno.
   Future<void> marcarFacturadas() => f.store.update(
@@ -520,6 +527,200 @@ void main() {
       printer.jobs.where((j) => j.description.contains('Informe Z')),
       hasLength(1),
     );
+  });
+
+  group('nº de envío y precuentas sin cobro (§5.15)', () {
+    test('el Z reinicia el nº de envío en la misma escritura y las comandas '
+        'abiertas conservan sus números', () async {
+      await setUpWith();
+      // Envío 1 en m1 (cobrada) y envíos 2 y 3 en m2, que sigue abierta.
+      await f.sala.aceptarLineas(submit('m1', [linea('l1', 'CANA', 7)]));
+      await f.sala.cobrar('m1', MetodoPago.efectivo, entregadoCents: 1000);
+      await f.sala.aceptarLineas(submit('m2', [linea('l2', 'CAFE', 1)]));
+      await f.sala.aceptarLineas(submit('m2', [linea('l3', 'AGUA', 1)]));
+      await f.sala.idle();
+      expect(f.store.snapshot.numeroEnvioSiguiente, 4);
+      final escrituras = <HostSnapshot>[];
+      final sub = f.store.changes.listen(escrituras.add);
+      addTearDown(sub.cancel);
+
+      final resumen = await service.cerrar(efectivoContadoCents: 665);
+      await settle();
+
+      // La escritura que archiva el cierre es la que reinicia el contador.
+      final archivo = escrituras.firstWhere(
+        (s) => s.historialCierres.isNotEmpty,
+      );
+      expect(archivo.historialCierres.first, resumen);
+      expect(archivo.numeroEnvioSiguiente, 1);
+      expect((await f.repo.load())!.numeroEnvioSiguiente, 1);
+      // Sin precuentas el resumen se escribe como siempre (sin la clave).
+      expect(resumen.precuentasSinCobro, isEmpty);
+      expect(resumen.toJson().containsKey('precuentasSinCobro'), isFalse);
+      expect(informeZImpreso(), isNot(contains('PRECUENTAS SIN COBRO')));
+      // La mesa abierta conserva sus números y el turno nuevo vuelve al 1.
+      expect(f.sala.comandaDeMesa('m2')!.lineas.map((l) => l.envio), [2, 3]);
+      final siguiente = await f.sala.aceptarLineas(
+        submit('m2', [linea('l4', 'CANA', 1)]),
+      );
+      expect(siguiente.comanda.lineaPorId('l4')!.envio, 1);
+      expect(f.store.snapshot.numeroEnvioSiguiente, 2);
+    });
+
+    test('precuenta, vaciar y Z: el resumen archiva la precuenta y la lista '
+        'del turno queda vacía', () async {
+      await setUpWith();
+      await vender();
+      await f.sala.aceptarLineas(submit('m1', [linea('l3', 'CANA', 7)]));
+      final precuenta = await f.sala.emitirPrecuenta('m1', emitidaPor: 'Barra');
+      f.clock.advance(const Duration(minutes: 20));
+      await f.sala.vaciarMesa('m1', motivo: 'Se marcharon sin pagar');
+      expect(f.store.snapshot.precuentasSinCobro, hasLength(1));
+
+      final resumen = await service.cerrar(efectivoContadoCents: 665);
+      await settle();
+
+      final archivada = resumen.precuentasSinCobro.single;
+      expect(archivada.precuenta, precuenta);
+      expect(archivada.precuenta.totalCents, 665);
+      expect(archivada.vaciadaEn, f.clock.now);
+      expect(archivada.motivo, 'Se marcharon sin pagar');
+      expect(f.store.snapshot.precuentasSinCobro, isEmpty);
+      // Lo devuelto, lo emitido y lo archivado son el mismo resumen.
+      expect(service.historial, [resumen]);
+      expect(cierres, [resumen]);
+      final diario = (await f.repo.load())!;
+      expect(diario.precuentasSinCobro, isEmpty);
+      expect(diario.historialCierres.single, resumen);
+      // La precuenta no es una venta: el informe no cambia.
+      expect(resumen.numTickets, 2);
+      expect(resumen.ventasTotalCents, 765);
+      // El informe impreso lleva la sección con la precuenta y su motivo.
+      final informe = informeZImpreso();
+      final seccion = informe.indexOf('PRECUENTAS SIN COBRO');
+      expect(seccion, greaterThan(0));
+      expect(informe[seccion + 1], startsWith('Nº 1 · Mesa 1 · '));
+      expect(informe[seccion + 1], endsWith('6,65 €'));
+      expect(informe[seccion + 2].trim(), 'Se marcharon sin pagar');
+      expect(informe[seccion + 3], startsWith('Precuentas sin cobro'));
+      expect(informe[seccion + 3], endsWith('1'));
+
+      // Un Z siguiente no la vuelve a archivar.
+      await vender();
+      final otro = await service.cerrar(efectivoContadoCents: 665);
+      expect(otro.precuentasSinCobro, isEmpty);
+    });
+
+    test(
+      'una mesa vaciada mientras se calcula el Z entra en este cierre',
+      () async {
+        final runner = RetenedorRunner();
+        await setUpWith(runner: runner);
+        await service.iniciarTurno(10000);
+        await vender();
+        await f.sala.aceptarLineas(submit('m1', [linea('l3', 'CANA', 7)]));
+        final precuenta = await f.sala.emitirPrecuenta('m1');
+        runner.retener = Completer<void>();
+
+        final cerrando = service.cerrar(efectivoContadoCents: 10665);
+        await runner.llamado.future;
+        // Ventana: se vacía la mesa (con su precuenta) mientras se calcula.
+        await f.sala.vaciarMesa('m1', motivo: 'Invitación');
+        expect(f.store.snapshot.precuentasSinCobro, hasLength(1));
+        runner.retener!.complete();
+        runner.retener = null;
+
+        final resumen = await cerrando;
+        await settle();
+        expect(resumen.precuentasSinCobro.map((p) => p.precuenta), [precuenta]);
+        expect(resumen.precuentasSinCobro.single.motivo, 'Invitación');
+        expect(f.store.snapshot.precuentasSinCobro, isEmpty);
+        expect(service.historial, [resumen]);
+      },
+    );
+
+    test('con descuadre, la escritura que archiva el Z y encola su asiento '
+        'también reinicia el nº de envío y archiva las precuentas', () async {
+      await setUpWith();
+      await vender(); // Envíos 1 (m1) y 2 (m2), ya cobrados.
+      // m2 se vuelve a abrir con el envío 3; m1, con el 4, se precuenta y se
+      // vacía sin cobrar.
+      await f.sala.aceptarLineas(submit('m2', [linea('l3', 'CAFE', 1)]));
+      await f.sala.aceptarLineas(submit('m1', [linea('l4', 'CANA', 7)]));
+      final precuenta = await f.sala.emitirPrecuenta('m1');
+      await f.sala.vaciarMesa('m1', motivo: 'Se marcharon sin pagar');
+      expect(f.store.snapshot.numeroEnvioSiguiente, 5);
+      final escrituras = <HostSnapshot>[];
+      final sub = f.store.changes.listen(escrituras.add);
+      addTearDown(sub.cancel);
+
+      // Sin turno: esperado 6,65 €, contado 6,00 → faltan 0,65 (659/570).
+      final resumen = await service.cerrar(efectivoContadoCents: 600);
+      await settle();
+
+      expect(resumen.descuadreCents, -65);
+      expect(resumen.asientoEncolado, isTrue);
+      expect(resumen.precuentasSinCobro.map((p) => p.precuenta), [precuenta]);
+      // Archivo, asiento, reinicio y precuentas van en la misma escritura.
+      final archivo = escrituras.firstWhere(
+        (s) => s.historialCierres.isNotEmpty,
+      );
+      expect(archivo.historialCierres.first, resumen);
+      expect(
+        archivo.jobPorId('asientoZ:${resumen.documentoAsiento}'),
+        isNotNull,
+      );
+      expect(archivo.numeroEnvioSiguiente, 1);
+      expect(archivo.precuentasSinCobro, isEmpty);
+      final diario = (await f.repo.load())!;
+      expect(diario.numeroEnvioSiguiente, 1);
+      expect(diario.precuentasSinCobro, isEmpty);
+      expect(diario.historialCierres.single, resumen);
+      expect(accounting.contabilizados.single.clave, resumen.documentoAsiento);
+      // La mesa abierta conserva su número de envío.
+      expect(f.sala.comandaDeMesa('m2')!.lineas.single.envio, 3);
+    });
+
+    test('con una retirada anotada durante el cálculo (el Z deja un turno '
+        'siguiente) también reinicia el nº de envío y archiva las '
+        'precuentas', () async {
+      final runner = RetenedorRunner();
+      await setUpWith(runner: runner);
+      await service.iniciarTurno(10000);
+      await vender();
+      await f.sala.aceptarLineas(submit('m1', [linea('l3', 'CANA', 7)]));
+      final precuenta = await f.sala.emitirPrecuenta('m1');
+      await f.sala.vaciarMesa('m1', motivo: 'Invitación');
+      expect(f.store.snapshot.numeroEnvioSiguiente, 4);
+      final escrituras = <HostSnapshot>[];
+      final sub = f.store.changes.listen(escrituras.add);
+      addTearDown(sub.cancel);
+      runner.retener = Completer<void>();
+
+      final cerrando = service.cerrar(efectivoContadoCents: 10665);
+      await runner.llamado.future;
+      // Ventana: se retira efectivo; el turno siguiente nace con la retirada.
+      await service.registrarRetirada(500);
+      runner.retener!.complete();
+      runner.retener = null;
+
+      final resumen = await cerrando;
+      await settle();
+      expect(resumen.asientoEncolado, isFalse);
+      expect(resumen.precuentasSinCobro.map((p) => p.precuenta), [precuenta]);
+      expect(resumen.precuentasSinCobro.single.motivo, 'Invitación');
+      final archivo = escrituras.firstWhere(
+        (s) => s.historialCierres.isNotEmpty,
+      );
+      expect(archivo.historialCierres.first, resumen);
+      expect(archivo.cierreAbierto!.retiradasCents, 500);
+      expect(archivo.numeroEnvioSiguiente, 1);
+      expect(archivo.precuentasSinCobro, isEmpty);
+      final diario = (await f.repo.load())!;
+      expect(diario.cierreAbierto, service.turno);
+      expect(diario.numeroEnvioSiguiente, 1);
+      expect(diario.precuentasSinCobro, isEmpty);
+    });
   });
 
   test(

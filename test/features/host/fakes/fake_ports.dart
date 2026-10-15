@@ -13,6 +13,8 @@ import 'package:proyecto_comandero/core/facturascripts/documents/invoice_models.
 import 'package:proyecto_comandero/core/facturascripts/documents/supplier_order_models.dart';
 import 'package:proyecto_comandero/core/facturascripts/master_data/fs_master_models.dart';
 import 'package:proyecto_comandero/core/inventory/inventory_models.dart';
+import 'package:proyecto_comandero/core/network/printing/print_queue.dart'
+    show PrintRetryPolicy;
 import 'package:proyecto_comandero/core/network/printing/raw_printer_transport.dart';
 import 'package:proyecto_comandero/features/host/application/ports.dart';
 
@@ -64,16 +66,61 @@ final class FakeInvoicePort with _Faults implements InvoicePort {
   final List<TicketFactura> recibidos = [];
   int siguienteId = 1;
 
+  /// Fecha y hora de expedición que «FS» devuelve con cada factura (distinta
+  /// de la del ticket a propósito: el ERP puede cambiarla). A `null`, el
+  /// resultado sale sin fecha, como si FS no la devolviera ni al releer.
+  DateTime? fecha = DateTime(2026, 10, 7, 13, 31);
+
+  /// Si «FS» devuelve el total de la factura. A `false`, `totalFsCents` queda
+  /// nulo y `totalCents` sigue siendo el del ticket, como hace
+  /// `FsInvoiceService`.
+  bool devuelveTotal = true;
+
+  /// Si no es nulo, se espera con la petición en vuelo, antes de responder o
+  /// de fallar: simula lo que pasa en el host mientras el ERP trabaja (p. ej.
+  /// una escritura en el diario).
+  Future<void> Function(TicketFactura ticket)? antesDeResponder;
+
+  /// Si no es nula, cada petición espera a que se complete antes de
+  /// responder o de fallar (después de [antesDeResponder]): retiene la
+  /// factura para probar la espera del cobro y la emisión pendiente. Una
+  /// puerta ya completada no retiene nada; para volver a retener, otra nueva.
+  Completer<void>? puerta;
+
+  /// Peticiones retenidas ahora mismo en la [puerta].
+  int retenidas = 0;
+
+  /// Completa la [puerta] (si la hay y no estaba completada) y deja pasar
+  /// las peticiones retenidas. Útil en el `tearDown`, para que nada se quede
+  /// esperando.
+  void abrirPuerta() {
+    final abierta = puerta;
+    if (abierta != null && !abierta.isCompleted) abierta.complete();
+  }
+
   @override
   Future<ResultadoFactura> crearOReanudar(TicketFactura ticket) async {
+    await antesDeResponder?.call(ticket);
+    final retenida = puerta;
+    if (retenida != null) {
+      retenidas++;
+      try {
+        await retenida.future;
+      } finally {
+        retenidas--;
+      }
+    }
     _consume();
     recibidos.add(ticket);
     final id = siguienteId++;
+    final totalFsCents = devuelveTotal ? ticket.totalEsperadoCents : null;
     return ResultadoFactura(
       idfactura: id,
       codigo: 'F2026S$id',
       numero: '$id',
-      totalCents: ticket.totalEsperadoCents,
+      fecha: fecha,
+      totalCents: totalFsCents ?? ticket.totalEsperadoCents,
+      totalFsCents: totalFsCents,
       pagada: ticket.modoPago == ModoPago.nacePagada,
       idasiento: 100 + id,
       emitida: ticket.emitir,
@@ -181,7 +228,15 @@ final class FakeMasterDataPort with _Faults implements MasterDataPort {
         editable: false,
       ),
     ],
-  });
+    FsEmpresa? empresa,
+  }) : empresaFs = empresa;
+
+  /// Empresa que devuelve [empresa] (`cifnif`, dirección…). Nula, una «Bar
+  /// de pruebas» sin NIF con el id pedido.
+  FsEmpresa? empresaFs;
+
+  /// Ids que se han pedido a [empresa], en orden.
+  final List<int> empresasPedidas = [];
 
   List<FsFormaPago> formas;
   List<FsEstadoDocumento> estados;
@@ -202,7 +257,9 @@ final class FakeMasterDataPort with _Faults implements MasterDataPort {
   @override
   Future<FsEmpresa> empresa(int idempresa) async {
     _consume();
-    return FsEmpresa(idempresa: idempresa, nombre: 'Bar de pruebas');
+    empresasPedidas.add(idempresa);
+    return empresaFs ??
+        FsEmpresa(idempresa: idempresa, nombre: 'Bar de pruebas');
   }
 
   @override
@@ -313,30 +370,74 @@ typedef PrintedJob = ({
   PrinterEndpoint endpoint,
   Uint8List bytes,
   String description,
+  PrintRetryPolicy reintento,
 });
 
-final class FakePrinterPort implements PrinterPort {
+final class FakePrinterPort implements RetryablePrinterPort {
   final List<PrintedJob> jobs = [];
 
-  /// Si no es nulo, todos los trabajos terminan con este error.
+  /// Si no es nulo, todos los trabajos terminan con este error (también los
+  /// reintentados: se lee al seguir cada uno).
   String? error;
+
+  /// Si no es nulo, [imprimir] lo lanza sin encolar nada, como la cola
+  /// llena o cerrada.
+  PrinterException? errorAlEncolar;
+
+  /// Ids pasados a [reintentar], en orden (los mismos bytes, sin trabajo
+  /// nuevo en [jobs]).
+  final List<String> reintentados = [];
+
+  /// Trabajos que fallaron sin enviar nada (todos sus intentos fallaron al
+  /// conectar): [nadaEnviado] da `true` solo para ellos.
+  final Set<String> sinEnviar = {};
+
+  /// Si no es nulo, [reintentar] lo lanza, como la cola cerrada o llena.
+  PrinterException? errorAlReintentar;
 
   @override
   String imprimir(
     PrinterEndpoint endpoint,
     Uint8List bytes, {
     required String description,
+    PrintRetryPolicy reintento = PrintRetryPolicy.always,
   }) {
+    final fallo = errorAlEncolar;
+    if (fallo != null) throw fallo;
     final id = 'print-${jobs.length + 1}';
     jobs.add((
       id: id,
       endpoint: endpoint,
       bytes: bytes,
       description: description,
+      reintento: reintento,
     ));
     return id;
   }
 
   @override
   Future<String?> terminado(String jobId) async => error;
+
+  /// Registra el id en [reintentados] y lo devuelve. Lanza
+  /// [errorAlReintentar] o, si el trabajo no existe, [PrinterException].
+  @override
+  String reintentar(String jobId) {
+    _existeOLanza(jobId);
+    final fallo = errorAlReintentar;
+    if (fallo != null) throw fallo;
+    reintentados.add(jobId);
+    return jobId;
+  }
+
+  @override
+  bool nadaEnviado(String jobId) {
+    _existeOLanza(jobId);
+    return sinEnviar.contains(jobId);
+  }
+
+  void _existeOLanza(String jobId) {
+    if (!jobs.any((job) => job.id == jobId)) {
+      throw PrinterException('No existe el trabajo de impresión $jobId');
+    }
+  }
 }
