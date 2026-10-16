@@ -8,6 +8,7 @@ import '../../../core/isolates/escandallos/escandallo_engine.dart';
 import '../../../core/isolates/isolate_runner.dart';
 import '../../../core/logging/app_logger.dart';
 import '../../../core/utils/json_map.dart';
+import '../../../core/utils/streams.dart';
 import '../../sala/domain/comanda.dart';
 import '../../sala/domain/linea_comanda.dart';
 import '../../sala/domain/mesa.dart';
@@ -391,5 +392,7 @@ final class StockService extends SalaEffects {
     return false;
   }
 
-  Future<void> dispose() => _descuentos.close();
+  Future<void> dispose() async {
+    cerrarSinEsperar(_descuentos);
+  }
 }

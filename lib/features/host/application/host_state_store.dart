@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import '../../../core/logging/app_logger.dart';
+import '../../../core/utils/streams.dart';
 import '../domain/host_snapshot.dart';
 import 'alert_bus.dart';
 import 'host_state_repository.dart';
@@ -97,6 +98,6 @@ final class HostStateStore {
   Future<void> dispose() async {
     _disposed = true;
     await _saving;
-    await _changes.close();
+    cerrarSinEsperar(_changes);
   }
 }

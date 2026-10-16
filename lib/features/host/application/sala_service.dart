@@ -9,6 +9,7 @@ import '../../../core/facturascripts/catalog/catalog_models.dart'
 import '../../../core/fiscal/fs_totales_calculator.dart';
 import '../../../core/logging/app_logger.dart';
 import '../../../core/money/money.dart';
+import '../../../core/utils/streams.dart';
 import '../../sala/domain/comanda.dart';
 import '../../sala/domain/enrutamiento_comandas.dart';
 import '../../sala/domain/linea_comanda.dart';
@@ -770,7 +771,7 @@ final class SalaService {
 
   Future<void> dispose() async {
     await idle();
-    await _changes.close();
-    await _enrutamientoChanges.close();
+    cerrarSinEsperar(_changes);
+    cerrarSinEsperar(_enrutamientoChanges);
   }
 }

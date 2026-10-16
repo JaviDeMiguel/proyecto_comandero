@@ -23,6 +23,7 @@ import 'package:http/io_client.dart';
 
 import '../errors/app_exception.dart';
 import '../logging/app_logger.dart';
+import '../utils/streams.dart';
 import 'fs_api.dart';
 import 'fs_api_config.dart';
 import 'fs_http_guard.dart';
@@ -82,7 +83,7 @@ final class FsHttpApi implements FsApi {
     if (_closed) return;
     _closed = true;
     if (_ownsClient) _client.close();
-    await _guardStates.close();
+    cerrarSinEsperar(_guardStates);
   }
 
   // ---------------------------------------------------------------------------

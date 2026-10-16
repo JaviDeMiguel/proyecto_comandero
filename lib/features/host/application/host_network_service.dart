@@ -8,6 +8,7 @@ import '../../../core/network/discovery/udp_discovery_responder.dart';
 import '../../../core/network/protocol/message.dart';
 import '../../../core/network/protocol/transport_messages.dart';
 import '../../../core/network/tcp/tcp_host_server.dart';
+import '../../../core/utils/streams.dart';
 import '../../sala/protocol/sala_messages.dart';
 import 'alert_bus.dart';
 import 'catalog_service.dart';
@@ -232,7 +233,7 @@ final class HostNetworkService {
 
   Future<void> dispose() async {
     await stop();
-    await _sessionEvents.close();
+    cerrarSinEsperar(_sessionEvents);
   }
 
   // ---------------------------------------------------------------------------

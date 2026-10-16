@@ -4,6 +4,7 @@ import 'dart:convert';
 import '../../../core/errors/app_exception.dart';
 import '../../../core/facturascripts/catalog/catalog_models.dart';
 import '../../../core/logging/app_logger.dart';
+import '../../../core/utils/streams.dart';
 import '../../sala/protocol/sala_messages.dart';
 import 'alert_bus.dart';
 import 'host_state_store.dart';
@@ -110,5 +111,7 @@ final class CatalogService {
     return '$alto$bajo';
   }
 
-  Future<void> dispose() => _changes.close();
+  Future<void> dispose() async {
+    cerrarSinEsperar(_changes);
+  }
 }

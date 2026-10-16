@@ -9,6 +9,7 @@ import '../../../core/isolates/reposicion/reposicion_models.dart';
 import '../../../core/logging/app_logger.dart';
 import '../../../core/money/money.dart';
 import '../../../core/utils/json_map.dart';
+import '../../../core/utils/streams.dart';
 import '../domain/host_settings.dart';
 import '../domain/sync_job.dart';
 import 'alert_bus.dart';
@@ -340,6 +341,6 @@ final class ReposicionService {
     _debounce?.cancel();
     _debounce = null;
     await _enCurso;
-    await _auditorias.close();
+    cerrarSinEsperar(_auditorias);
   }
 }

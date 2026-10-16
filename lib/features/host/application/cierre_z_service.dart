@@ -12,6 +12,7 @@ import '../../../core/isolates/isolate_runner.dart';
 import '../../../core/logging/app_logger.dart';
 import '../../../core/money/money.dart';
 import '../../../core/utils/json_map.dart';
+import '../../../core/utils/streams.dart';
 import '../../sala/domain/ticket.dart';
 import '../domain/host_settings.dart';
 import '../domain/host_snapshot.dart';
@@ -610,5 +611,7 @@ final class CierreZService {
     ],
   );
 
-  Future<void> dispose() => _cierres.close();
+  Future<void> dispose() async {
+    cerrarSinEsperar(_cierres);
+  }
 }

@@ -7,6 +7,7 @@ import 'package:uuid/uuid.dart';
 import '../../../core/database/mysql_database.dart' show TransactionException;
 import '../../../core/errors/app_exception.dart';
 import '../../../core/logging/app_logger.dart';
+import '../../../core/utils/streams.dart';
 import '../domain/host_snapshot.dart';
 import '../domain/sync_job.dart';
 import 'alert_bus.dart';
@@ -387,8 +388,8 @@ final class SyncOutbox {
   Future<void> dispose() async {
     await stop();
     _disposed = true;
-    await _status.close();
-    await _terminados.close();
+    cerrarSinEsperar(_status);
+    cerrarSinEsperar(_terminados);
   }
 
   // ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import '../../../core/logging/app_logger.dart';
+import '../../../core/utils/streams.dart';
 import '../domain/operational_alert.dart';
 
 /// Canal común de avisos operativos de todos los servicios del host.
@@ -71,5 +72,7 @@ final class AlertBus {
     if (!_controller.isClosed) _controller.add(alert);
   }
 
-  Future<void> dispose() => _controller.close();
+  Future<void> dispose() async {
+    cerrarSinEsperar(_controller);
+  }
 }

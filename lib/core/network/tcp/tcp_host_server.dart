@@ -8,6 +8,7 @@ import 'package:uuid/uuid.dart';
 
 import '../../errors/app_exception.dart';
 import '../../logging/app_logger.dart';
+import '../../utils/streams.dart';
 import '../protocol/frame_codec.dart';
 import '../protocol/message.dart';
 import '../protocol/transport_messages.dart';
@@ -276,7 +277,7 @@ final class TcpHostServer {
   /// volver a arrancar.
   Future<void> dispose() async {
     await stop();
-    await _events.close();
+    cerrarSinEsperar(_events);
   }
 
   /// Envía un evento de aplicación a todas las sesiones (menos la de
