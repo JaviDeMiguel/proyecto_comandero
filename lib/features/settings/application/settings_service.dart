@@ -4,6 +4,7 @@ import 'package:uuid/uuid.dart';
 
 import '../../../core/errors/app_exception.dart';
 import '../../../core/logging/app_logger.dart';
+import '../../../core/utils/streams.dart';
 import '../domain/app_settings.dart';
 
 /// Persistencia de los ajustes (Shared Preferences + almacenamiento seguro,
@@ -252,7 +253,7 @@ final class SettingsService {
     if (_disposed) return;
     _disposed = true;
     await _queue;
-    await _changes.close();
+    cerrarSinEsperar(_changes);
   }
 
   AppSettings _nuevosDefaults() {

@@ -7,6 +7,7 @@ import 'package:meta/meta.dart';
 
 import '../../errors/app_exception.dart';
 import '../../logging/app_logger.dart';
+import '../../utils/streams.dart';
 import '../protocol/frame_codec.dart';
 import '../protocol/message.dart';
 import '../protocol/transport_messages.dart';
@@ -342,8 +343,8 @@ final class TcpComanderoClient {
     if (_disposed) return;
     await disconnect();
     _disposed = true;
-    await _states.close();
-    await _messages.close();
+    cerrarSinEsperar(_states);
+    cerrarSinEsperar(_messages);
   }
 
   /// Envía una petición de aplicación y espera su respuesta.

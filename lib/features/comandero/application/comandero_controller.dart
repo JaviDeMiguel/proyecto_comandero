@@ -9,6 +9,7 @@ import '../../../core/network/discovery/discovery_protocol.dart';
 import '../../../core/network/discovery/udp_discovery_scanner.dart';
 import '../../../core/network/protocol/message.dart';
 import '../../../core/network/tcp/tcp_comandero_client.dart';
+import '../../../core/utils/streams.dart';
 import '../../sala/domain/comanda.dart';
 import '../../sala/domain/enrutamiento_comandas.dart';
 import '../../sala/domain/linea_comanda.dart' show DestinoPreparacion;
@@ -207,10 +208,9 @@ final class ComanderoController {
   // Descubrimiento y conexión
   // ---------------------------------------------------------------------------
 
-  /// Arranque habitual: conecta con el host manual si está configurado; si
-  /// no, busca por UDP y conecta cuando hay exactamente un host sin
-  /// emparejamiento pendiente de código. Devuelve `true` si inició una
-  /// conexión.
+  /// Arranque habitual: conecta con el host manual si está configurado; si no,
+  /// busca por UDP y conecta cuando hay exactamente un host sin emparejamiento
+  /// pendiente de código. Devuelve `true` si inició una conexión.
   Future<bool> iniciar({Duration? timeout}) async {
     _checkNotDisposed();
     final manual = _config.hostManual;
@@ -382,9 +382,9 @@ final class ComanderoController {
     await _clientMessages?.cancel();
     await _client.dispose();
     _disposed = true;
-    await _states.close();
-    await _pedidosCambiados.close();
-    await _avisos.close();
+    cerrarSinEsperar(_states);
+    cerrarSinEsperar(_pedidosCambiados);
+    cerrarSinEsperar(_avisos);
   }
 
   /// Cierra el controlador para que otro retome su trabajo: corta la sesión

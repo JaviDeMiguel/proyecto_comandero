@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../core/errors/app_exception.dart';
 import '../../../core/logging/app_logger.dart';
+import '../../../core/utils/streams.dart';
 import '../application/settings_service.dart';
 import '../domain/app_settings.dart';
 import 'secret_store.dart';
@@ -163,7 +164,9 @@ final class SharedPrefsSettingsRepository
   }
 
   /// Libera el flujo de avisos.
-  Future<void> dispose() => _avisos.close();
+  Future<void> dispose() async {
+    cerrarSinEsperar(_avisos);
+  }
 
   // ---------------------------------------------------------------- secretos
 
