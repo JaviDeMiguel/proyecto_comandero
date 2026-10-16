@@ -36,6 +36,22 @@ flutter build windows --debug      # Windows (requiere Modo de desarrollador)
 
 Si el `dart` del PATH no es el del SDK de Flutter, usa `<flutter>/bin/dart.bat test` (ver `CLAUDE.md`).
 
+## Prueba de flujo en Windows
+
+Arranca la app real en modo host sobre la interfaz de escritorio y recorre una mesa de punta a punta: comensales, platos en Primeros y Segundos y una bebida, envío (comandas de cocina y barra), «Marchar», precuenta, cobro en efectivo (documento provisional con apertura del cajón), factura de FacturaScripts con ORIGINAL y DUPLICADO y el detalle del ticket en *Caja y Cierre Z*. Las impresoras son servidores TCP locales que reciben los bytes ESC/POS de verdad, y el ERP está simulado en memoria:
+
+```bash
+flutter test integration_test/host_flujo_impresion_test.dart -d windows
+```
+
+La misma prueba incluye el cobro contra un FacturaScripts **de pruebas** (crea una factura real y la borra al terminar; **nunca** contra producción). Sin estas variables se omite sola:
+
+```bash
+flutter test integration_test/host_flujo_impresion_test.dart -d windows \
+  --dart-define=TPV_FS_BASE_URL=http://localhost/fs_pruebas \
+  --dart-define=TPV_FS_TOKEN=<clave> [--dart-define=TPV_FS_REF=<plato>]
+```
+
 ## Primer arranque
 
 La aplicación pregunta el rol del dispositivo la primera vez (se puede cambiar después en Ajustes):
@@ -107,6 +123,7 @@ lib/features     sala (dominio y protocolo), host (runtime, cola de sincronizaci
                  comandero (controlador y pantallas), settings, escandallos, cierre_z
 sql/             DDL de las tablas propias (tpv_escandallos, tpv_movimientos_stock)
 test/            tests Dart puro (espejo de lib), test/widget (Flutter), test/integration (con variables de entorno)
+integration_test/ prueba de flujo del host sobre la interfaz real (escritorio Windows)
 ```
 
 Los tests de integración contra una instancia de FacturaScripts/MySQL se activan con `TPV_FS_BASE_URL`, `TPV_FS_TOKEN`, `TPV_MYSQL_HOST`, `TPV_MYSQL_PORT`, `TPV_MYSQL_USER`, `TPV_MYSQL_PASSWORD` y `TPV_MYSQL_DATABASE`; sin ellas se omiten.
