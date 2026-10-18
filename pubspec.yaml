@@ -1,7 +1,7 @@
 name: proyecto_comandero
 description: "TPV y Comandero de hostelería integrado con FacturaScripts: modo Servidor/Host (tablet) y modo Comandero (móvil)."
 publish_to: 'none'
-version: 0.1.0+1
+version: 1.0.0+1
 
 environment:
   sdk: ^3.13.3

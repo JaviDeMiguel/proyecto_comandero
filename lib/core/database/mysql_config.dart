@@ -13,7 +13,7 @@ final class MysqlConfig extends Equatable {
     required this.user,
     required this.password,
     required this.database,
-    this.secure = false,
+    this.secure = true,
     this.connectTimeout = const Duration(seconds: 5),
     this.queryTimeout = const Duration(seconds: 15),
   });
@@ -27,6 +27,10 @@ final class MysqlConfig extends Equatable {
     user: json.requireString('user'),
     password: json.optionalString('password') ?? '',
     database: json.requireString('database'),
+    // `toJson` escribe siempre `secure`, así que todo ajuste guardado por la
+    // app conserva su valor. Si falta (JSON escrito a mano o anterior a este
+    // campo) se lee `false`, como antes de que TLS fuera el valor por defecto:
+    // no se cambia en silencio el comportamiento de una configuración ya hecha.
     secure: json.optionalBool('secure') ?? false,
     connectTimeout: Duration(
       milliseconds: json.optionalInt('connectTimeoutMs') ?? 5000,
@@ -44,9 +48,11 @@ final class MysqlConfig extends Equatable {
   /// Nombre de la base de datos de FacturaScripts (`FS_DB_NAME`).
   final String database;
 
-  /// Usar TLS. Con MySQL 8 y el plugin `caching_sha2_password`, la primera
-  /// autenticación de un usuario (sin contraseña en la caché del servidor)
-  /// solo es posible con TLS; con la caché caliente funciona sin TLS.
+  /// Usar TLS (por defecto, sí). Con MySQL 8 y el plugin
+  /// `caching_sha2_password`, la primera autenticación de un usuario (sin
+  /// contraseña en la caché del servidor) solo es posible con TLS; con la
+  /// caché caliente funciona sin TLS. El usuario que crea el asistente del
+  /// plugin Hosteleria exige además `REQUIRE SSL`.
   final bool secure;
 
   /// Tiempo máximo para abrir el socket y completar la autenticación.

@@ -1,4 +1,4 @@
-package com.example.proyecto_comandero
+package es.tpvcomandero.app
 
 import android.content.Context
 import android.net.wifi.WifiManager

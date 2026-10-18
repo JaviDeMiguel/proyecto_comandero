@@ -17,6 +17,8 @@ La integración con el ERP sigue dos vías, como exige la lógica de FacturaScri
 
 Los cálculos pesados (resolución matricial de escandallos con merma, auditoría de stock mínimo, cuadre contable Debe/Haber y generación/rasterizado ESC/POS) se ejecutan en isolates (`Isolate.run`) con funciones top-level y DTOs planos: el hilo de UI nunca se bloquea.
 
+> **Instalar en un cliente:** sigue la [guía de instalación](INSTALACION.md) (plugin de FacturaScripts, instalador de Windows, APK de Android, red, copias de seguridad y actualizaciones). Los paquetes se generan con `tool/empaquetar.ps1` en `dist/`.
+
 ## Requisitos
 
 - Flutter 3.47 (Dart 3.13). En Windows, para compilar el escritorio hace falta el *Modo de desarrollador* activado (enlaces simbólicos de los plugins).
@@ -32,6 +34,7 @@ flutter analyze
 flutter test                       # suites Dart puro + widgets
 flutter build apk --debug          # Android
 flutter build windows --debug      # Windows (requiere Modo de desarrollador)
+powershell -ExecutionPolicy Bypass -File tool\empaquetar.ps1   # paquetes de publicación en dist/ (ver INSTALACION.md)
 ```
 
 Si el `dart` del PATH no es el del SDK de Flutter, usa `<flutter>/bin/dart.bat test` (ver `CLAUDE.md`).
@@ -98,7 +101,7 @@ El plugin **Hosteleria** (código en [`erp/Hosteleria`](erp/Hosteleria) de este 
 - Un **asistente** (*Hostelería → Configurar TPV*) con 22 comprobaciones y un botón para corregir cada una: API activada, ejercicio, cuentas *Caja* (570) y *Banco TPV* (572) y subcuentas del cierre Z, formas de pago `TPVEFE` (Efectivo TPV) y `TPVTAR` (Tarjeta TPV) que nacen pagadas, cliente genérico `TPV` ("CLIENTES VARIOS (TPV)"), serie `S` (simplificada), almacén activo, clave de API *TPV Comandero* con acceso solo a los 23 recursos que usa la app, tablas `tpv_*` con sus índices únicos, rol *Hosteleria*, recetas válidas para el motor de la app, platos/materias primas con el control de stock correcto, venta sin stock (un envasado sin stock bloquearía la cola de facturas), costes, reposición automática, stock de cocina y barra, carta y destinos, y claves del TPV duplicadas. También genera, a petición, el usuario de MySQL del TPV con privilegios mínimos (por columna en `stocks`, `variantes` y `productos`; solo `SELECT`/`INSERT` en el diario) y TLS, y muestra el resumen de valores para los Ajustes de la app.
 - Una **carta de ejemplo** opcional (restaurante manchego): familias con destino, platos y bebidas con IVA 10 %, materias primas con stock mínimo, proveedores con precios y escandallos con merma.
 
-Instalación: copia `erp/Hosteleria` en la carpeta `Plugins/` de FacturaScripts, actívalo en *Panel de control → Plugins* y ejecuta el asistente. Para actualizarlo, sube su ZIP en *Plugins* o, si copias la carpeta, pulsa *Reconstruir* y después *Reparar el rol* en el asistente (o desactiva y activa el plugin): FacturaScripts solo ejecuta su `update()` al activarlo. Solo MySQL / MariaDB. Sin el plugin la app funciona igual (sin destinos en el ERP; las formas de pago se eligen en Ajustes).
+Instalación: copia `erp/Hosteleria` en la carpeta `Plugins/` de FacturaScripts, actívalo en *Administrador → Plugins* (o sube allí `Hosteleria-<versión>.zip`, ver [INSTALACION.md](INSTALACION.md)) y ejecuta el asistente. Para actualizarlo, sube su ZIP en *Plugins* o, si copias la carpeta, pulsa *Reconstruir* y después *Reparar el rol* en el asistente (o desactiva y activa el plugin): FacturaScripts solo ejecuta su `update()` al activarlo. Solo MySQL / MariaDB. Sin el plugin la app funciona igual (sin destinos en el ERP; las formas de pago se eligen en Ajustes).
 
 ## Configuración recomendada en FacturaScripts
 

@@ -130,7 +130,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 
   // MySQL.
   bool _mysqlActivo = false;
-  bool _mysqlTls = false;
+  bool _mysqlTls = true;
   bool _verPassword = false;
   late final _myHost = _ctrl();
   late final _myPort = _ctrl();
@@ -218,7 +218,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     _myUser.text = mysql?.user ?? '';
     _myPassword.text = mysql?.password ?? '';
     _myDatabase.text = mysql?.database ?? '';
-    _mysqlTls = mysql?.secure ?? false;
+    // Sin MySQL configurado, TLS activado: lo exige MySQL 8 con
+    // caching_sha2_password y el usuario que crea el plugin (REQUIRE SSL).
+    _mysqlTls = mysql?.secure ?? true;
 
     final fiscal = s.fiscal;
     _serie.text = fiscal.codserie;

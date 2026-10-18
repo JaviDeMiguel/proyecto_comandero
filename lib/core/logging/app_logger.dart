@@ -14,17 +14,20 @@ Logger appLogger(String name) => Logger('tpv.$name');
 /// última configuración sustituye a la anterior.
 ///
 /// Por defecto los registros van a `dart:developer` (consola de depuración y
-/// DevTools); [onRecord] permite redirigirlos (fichero, tests...).
+/// DevTools); [onRecord] permite redirigirlos (fichero, tests...). Para
+/// enviarlos a varios sitios, combina [developerLogSink] con los demás.
 void configureLogging({
   Level level = Level.INFO,
   void Function(LogRecord record)? onRecord,
 }) {
   Logger.root.level = level;
   unawaited(_rootSubscription?.cancel());
-  _rootSubscription = Logger.root.onRecord.listen(onRecord ?? _developerSink);
+  _rootSubscription = Logger.root.onRecord.listen(onRecord ?? developerLogSink);
 }
 
-void _developerSink(LogRecord record) {
+/// Envía [record] a `dart:developer` (consola de depuración y DevTools; en
+/// release no lo ve nadie, de ahí el registro en fichero de la app).
+void developerLogSink(LogRecord record) {
   developer.log(
     record.message,
     time: record.time,

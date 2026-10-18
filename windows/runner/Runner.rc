@@ -89,13 +89,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "com.example" "\0"
-            VALUE "FileDescription", "proyecto_comandero" "\0"
+            VALUE "CompanyName", "TPV Comandero" "\0"
+            VALUE "FileDescription", "TPV Comandero (caja y comandas)" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "proyecto_comandero" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 com.example. All rights reserved." "\0"
-            VALUE "OriginalFilename", "proyecto_comandero.exe" "\0"
-            VALUE "ProductName", "proyecto_comandero" "\0"
+            VALUE "InternalName", "tpv_comandero" "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 TPV Comandero" "\0"
+            VALUE "OriginalFilename", "tpv_comandero.exe" "\0"
+            VALUE "ProductName", "TPV Comandero" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END
